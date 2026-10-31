@@ -106,9 +106,17 @@ jobs:
           meta = packed_ramdisk.pack(temp / 'fixture/owner-data-32.cdr', temp / 'out/cas-data-32m.dbr')
           (temp / 'out/cas-data-32m.dbr.json').write_text(json.dumps(meta, indent=2) + '\n')
           PY
+          # The grown seed is for the persistent store; the 32 MiB fixture alone boots a RAM-only Data
+          # volume, so a failed grow is reported but does not lose the fixture.
           if [ "$SIZE_GIB" != 0 ]; then
-            python3 unixnu/scripts/seed-data-grow.py --gib "$SIZE_GIB" \
-              "$out/cas-data-32m.dbr" "$out/cas-data-${SIZE_GIB}g.dbr" | tee "$out/cas-data-${SIZE_GIB}g.dbr.json"
+            sleep 5
+            if ! python3 unixnu/scripts/seed-data-grow.py --gib "$SIZE_GIB" \
+                "$out/cas-data-32m.dbr" "$out/cas-data-${SIZE_GIB}g.dbr" > "$out/cas-data-${SIZE_GIB}g.dbr.json" 2>&1; then
+              cat "$out/cas-data-${SIZE_GIB}g.dbr.json"
+              echo "::warning title=seed-data-grow::$(tail -n 1 "$out/cas-data-${SIZE_GIB}g.dbr.json")"
+              diskutil apfs list || true
+              rm -f "$out/cas-data-${SIZE_GIB}g.dbr" "$out/cas-data-${SIZE_GIB}g.dbr.json"
+            fi
           fi
           uuid=$(python3 -c "import json,os;print(json.load(open(os.environ['RUNNER_TEMP']+'/out/fixture-seed.json'))['volume_uuid'])")
           {
