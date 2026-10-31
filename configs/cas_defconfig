@@ -14,7 +14,10 @@ CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 # Original ApplePMGR nub (UniXNU-sheng ShengPlatformPower via scripts/build-platform-power.py);
 # AMFI panics "No PMGR?" without it. Hook from sheng-platform-power.patch in the SM8250 series.
 CONFIG_XNU_SHENG_PMGR=y
-# CONFIG_XNU_NATIVE_UFS is not set
+# UFS transport (ShengUfs, FFT-infra SM8250 fork); boot arguments choose probe or root mode.
+CONFIG_XNU_NATIVE_UFS=y
+# Refuse-everything verifier for the read-only probe image (scripts/build-link-stubs.py).
+CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"
 # CONFIG_XNU_NATIVE_ADRENO is not set
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
 # CONFIG_XNU_NATIVE_RAM_BLOCK_STORE is not set

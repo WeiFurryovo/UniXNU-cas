@@ -5,6 +5,14 @@ kind = "soc"
 git = "https://github.com/WeiFurryovo/UniXNU-sm8250-common.git"
 commit = "0ffc1f2ac884a97144867a423076d22106c76ea1"
 
+# UFS transport: FFT-infra's SM8250 fork of ShengUfs, the one UniXNU-alioth boots its UFS root
+# with (same SoC, host 0x1d84000, apps SMMU streams 0xe0/0x4e0).
+[[source]]
+name = "ShengUfs"
+kind = "driver"
+git = "https://github.com/FFT-infra/NativeUfs-alioth"
+commit = "ab5405905a1892da03a9a53e0fa3dcd255d04055"
+
 [[source]]
 name = "ArmCpu"
 kind = "driver"

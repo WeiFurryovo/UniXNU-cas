@@ -10,7 +10,7 @@ os_profile = "ipados-17.7.11-21H461"
 description = "Xiaomi 10 Ultra (cas): iPadOS 17.7.11 on UniXNU"
 
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "XnuPrelink", "DarwinBoot"]
 
 [kernel]
 defconfig = "cas_defconfig"
@@ -18,7 +18,7 @@ config_fragments = ["arch:configs/common.config", "soc:configs/sm8250.config", "
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
 # cas-armcpu-asm-fix.py must run before component:ArmCpu: it stages ArmCpu with the
 # Darwin assembler separator fix that upstream ArmCpu 9066b53 still lacks.
-archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py"]
+archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "component:ShengUfs", "build-storage-bindings.py --component NativeUfs --archive libShengUfs.a --directory build/sheng-ufs", "build-link-stubs.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py"]
 
 [device_tree]
 source = "device:dts/cas.dts"
@@ -52,7 +52,11 @@ timeout = 3
 panic_screen = true
 # sheng-pmgr=2 publishes the original ApplePMGR nub through ShengPlatformPower;
 # without it AMFI's early security init panics with "AMFI: No PMGR?".
-kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2"]
+# native-ufs-stream/stream2: SM8250 routes the UFS host through apps SMMU streams 0xe0 and
+# 0x4e0 (NativeUfs defaults to sheng's 0x60). native-ufs-probe=10 is the read-only check
+# before anything is flashed: bring-up, READ CAPACITY, LUN0 GPT -> userdata -> its first two
+# blocks, all SCSI READ(10), then a panic screen with the evidence. No write is issued.
+kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-probe=10"]
 
 [payload.adt]
 chip_id = "8011"

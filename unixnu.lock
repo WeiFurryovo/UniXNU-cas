@@ -15,6 +15,9 @@ commit = "3325e352d7df68a9f9ad74832ed94a6acbbd7390"
 [source."IOStorageFamily"]
 commit = "e45fbe30a7879e0b16e26dddb78538f1b00e0bff"
 
+[source."ShengUfs"]
+commit = "ab5405905a1892da03a9a53e0fa3dcd255d04055"
+
 [source."SoftwareAES"]
 commit = "4a45326da5c2cd6fe6813d79ee43db20805628af"
 
