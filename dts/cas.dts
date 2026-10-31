@@ -6,22 +6,21 @@
     model = "Qualcomm Technologies, Inc. xiaomi cas";
     compatible = "qcom,kona-mtp", "qcom,kona", "qcom,mtp";
     chosen { stdout-path = "/display"; };
+    // The 8 GiB model: ABL reports banks 0x80000000+0x3bb00000, 0xc0000000+3 GiB and
+    // 0x180000000+4 GiB. The ADT handoff takes one contiguous range; the gap at
+    // 0xbbb00000 is not DRAM and stays no-map below.
     memory@80000000 {
         device_type = "memory";
-        reg = <0x0 0x80000000 0x0 0x39900000>;
-    };
-    memory@c0000000 {
-        device_type = "memory";
-        reg = <0x0 0xc0000000 0x1 0x40000000>;
-    };
-    memory@200000000 {
-        device_type = "memory";
-        reg = <0x2 0x0 0x1 0x80000000>;
+        reg = <0x0 0x80000000 0x2 0x00000000>;
     };
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
         ranges;
+        dram_hole@bbb00000 {
+            reg = <0x0 0xbbb00000 0x0 0x04500000>;
+            no-map;
+        };
         region0@80000000 {
             reg = <0x0 0x80000000 0x0 0x600000>;
             no-map;
