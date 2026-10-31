@@ -18,7 +18,7 @@ config_fragments = ["arch:configs/common.config", "soc:configs/sm8250.config", "
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
 # cas-armcpu-asm-fix.py must run before component:ArmCpu: it stages ArmCpu with the
 # Darwin assembler separator fix that upstream ArmCpu 9066b53 still lacks.
-archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "build-mockfs-fixture.py", "build-libpthread-kernel.py"]
+archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py"]
 
 [device_tree]
 source = "device:dts/cas.dts"
@@ -50,7 +50,9 @@ loader = "firmware"
 title = "cas iPadOS 17"
 timeout = 3
 panic_screen = true
-kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120"]
+# sheng-pmgr=2 publishes the original ApplePMGR nub through ShengPlatformPower;
+# without it AMFI's early security init panics with "AMFI: No PMGR?".
+kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2"]
 
 [payload.adt]
 chip_id = "8011"

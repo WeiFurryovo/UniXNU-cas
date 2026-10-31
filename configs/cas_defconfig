@@ -11,6 +11,9 @@ CONFIG_XNU_DT_PANIC_REGION=y
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_SOURCE_MOCKFS=y
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
+# Original ApplePMGR nub (UniXNU-sheng ShengPlatformPower via scripts/build-platform-power.py);
+# AMFI panics "No PMGR?" without it. Hook from sheng-platform-power.patch in the SM8250 series.
+CONFIG_XNU_SHENG_PMGR=y
 # CONFIG_XNU_NATIVE_UFS is not set
 # CONFIG_XNU_NATIVE_ADRENO is not set
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
