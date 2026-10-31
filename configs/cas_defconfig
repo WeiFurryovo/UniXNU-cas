@@ -14,13 +14,30 @@ CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 # Original ApplePMGR nub (UniXNU-sheng ShengPlatformPower via scripts/build-platform-power.py);
 # AMFI panics "No PMGR?" without it. Hook from sheng-platform-power.patch in the SM8250 series.
 CONFIG_XNU_SHENG_PMGR=y
-# UFS transport (ShengUfs, FFT-infra SM8250 fork); boot arguments choose probe or root mode.
+# UFS root, the UniXNU-alioth chain: ShengUfs (FFT-infra SM8250 fork) publishes the SHNGROOT
+# windows of userdata; every block read is checked against the owner-signed OS and SystemOS
+# policies (scripts/build-owner-root-policies.py) through the verified Virtio bundle's hooks;
+# SystemOS is union-mounted; the payload's Data seed is published by RamBlock and mounted at
+# /private/var before launchd.
 CONFIG_XNU_NATIVE_UFS=y
-# Refuse-everything verifier for the read-only probe image (scripts/build-link-stubs.py).
+CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
+CONFIG_XNU_OWNER_CACHE_MOUNT=y
+CONFIG_XNU_OWNER_CACHE_STARTUP=y
+CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/virtio-mmio-block-verified-bundle/libVirtioMmioBlock.a"
+CONFIG_XNU_NATIVE_RAM_BLOCK=y
+CONFIG_XNU_OWNER_DATA_MOUNT=y
+# Volume UUID of the 32 MiB Data seed from .github/workflows/data-seed.yml run 41193517269
+# (cas-data-32m.dbr 07b588b2...); every seed build makes a new one.
+CONFIG_XNU_OWNER_DATA_VOLUME_UUID="1EDA187B-D502-4E9F-9A59-481F5BFC6D81"
+# boot_progress_poll for NativeUfs while CONFIG_XNU_BOOT_PROGRESS is off (scripts/build-link-stubs.py).
 CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"
 # CONFIG_XNU_NATIVE_ADRENO is not set
-# CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
-# CONFIG_XNU_NATIVE_RAM_BLOCK_STORE is not set
 
 # Successful observations log and continue; optional GUI/storage experiments remain off.
 CONFIG_XNU_BOOT_PROGRESS=n

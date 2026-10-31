@@ -29,6 +29,11 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--component', required=True, help='Compiled object name, e.g. NativeUfs')
 parser.add_argument('--archive', required=True, help='Archive name in --directory, e.g. libShengUfs.a')
 parser.add_argument('--directory', required=True, type=Path)
+parser.add_argument('--include-object', action='append', default=[], type=Path,
+                    help='Another storage driver object whose imports the same binding object must cover. Two force-loaded '
+                         'archives cannot both define the absolute names, so one carries the union for every driver')
+parser.add_argument('--verify-only', action='store_true',
+                    help='Check the object and record its bindings, but add nothing to the archive (another archive binds them)')
 args = parser.parse_args()
 directory = (ROOT / args.directory).resolve()
 out = ROOT / 'build/cas-storage-abi'
@@ -237,33 +242,42 @@ possible.update({'__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass': constructors[0]
                  '__ZTV20IOBlockStorageDevice': table,
                  '__ZN7IOMedia9metaClassE': holders[0]})
 
-# 4. The driver object: every original storage import must be one of the derived values, and every
+# 4. The driver objects: every original storage import must be one of the derived values, and every
 #    IOBlockStorageDevice subclass must dispatch through the original 190-slot shape.
+def check_object(path):
+    data = path.read_bytes()
+    image, rows = symbols_of(data)
+    imports = [name for name, value, kind in rows if kind == 1 and ('IOBlockStorageDevice' in name or 'IOMedia' in name)]
+    require(all(name in possible for name in imports), f'{path.name}: unqualified storage import: ' +
+            ', '.join(name for name in imports if name not in possible))
+    require(not any(re.search(r'IOBlockStorageDeviceD[01]Ev$', name) for name in imports),
+            f'{path.name}: driver must not invoke abstract complete/deleting destruction')
+    subclasses = []
+    for name, value, kind in rows:
+        if not name.startswith('__ZTV') or kind & 0xe != 0xe:
+            continue
+        slots = vtable_slots(data, image, rows, name)
+        if not any('IOBlockStorageDevice' in slot for slot in slots):
+            continue
+        mangled = name[len('__ZTV'):]
+        require(len(slots) == 190 and '___cxa_pure_virtual' not in slots, f'{name}: wrong dispatch shape')
+        for slot, (actual, expected) in enumerate(zip(slots, methods)):
+            own = actual.startswith(('__ZN' + mangled, '__ZNK' + mangled))
+            if expected == '___cxa_pure_virtual':
+                require(own, f'{name}: transport operation {slot} not implemented')
+            elif actual != expected and not own:
+                raise SystemExit(f'storage bindings: {name}: dispatch mismatch at slot {slot}')
+        subclasses.append(name)
+    require(subclasses, 'no IOBlockStorageDevice subclass in ' + path.name)
+    return data, imports, subclasses
+
+
 obj_path = directory / (args.component + '.o')
-obj = obj_path.read_bytes()
-image, rows = symbols_of(obj)
-undefined = [name for name, value, kind in rows if kind == 1 and ('IOBlockStorageDevice' in name or 'IOMedia' in name)]
-require(all(name in possible for name in undefined), 'unqualified storage import: ' +
-        ', '.join(name for name in undefined if name not in possible))
-require(not any(re.search(r'IOBlockStorageDeviceD[01]Ev$', name) for name in undefined),
-        'driver must not invoke abstract complete/deleting destruction')
-checked = []
-for name, value, kind in rows:
-    if not name.startswith('__ZTV') or kind & 0xe != 0xe:
-        continue
-    slots = vtable_slots(obj, image, rows, name)
-    if not any('IOBlockStorageDevice' in slot for slot in slots):
-        continue
-    mangled = name[len('__ZTV'):]
-    require(len(slots) == 190 and '___cxa_pure_virtual' not in slots, f'{name}: wrong dispatch shape')
-    for slot, (actual, expected) in enumerate(zip(slots, methods)):
-        own = actual.startswith(('__ZN' + mangled, '__ZNK' + mangled))
-        if expected == '___cxa_pure_virtual':
-            require(own, f'{name}: transport operation {slot} not implemented')
-        elif actual != expected and not own:
-            raise SystemExit(f'storage bindings: {name}: dispatch mismatch at slot {slot}')
-    checked.append(name)
-require(checked, 'no IOBlockStorageDevice subclass in ' + obj_path.name)
+obj, undefined, checked = check_object(obj_path)
+for extra in args.include_object:
+    _, imports, subclasses = check_object((ROOT / extra).resolve())
+    undefined = list(dict.fromkeys(undefined + imports))
+    checked += subclasses
 
 bindings = {name: possible[name] for name in undefined}
 assembly = directory / 'original-bindings.S'
@@ -272,9 +286,15 @@ subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-Werror', '
                 '-c', assembly, '-o', directory / 'original-bindings.o'], check=True)
 archive = directory / args.archive
 require(archive.is_file(), 'component archive missing: ' + str(archive))
-subprocess.run(['xcrun', 'ar', 'rcs', archive, directory / 'original-bindings.o'], check=True)
-(directory / 'storage-bindings.json').write_text(json.dumps(dict(
-    candidate_sha256=plan['candidate_sha256'], compiled_object_sha256=hashlib.sha256(obj).hexdigest(),
-    subclasses=checked, bindings={name: hex(value) for name, value in sorted(bindings.items())},
-    derivation='static', live_qualified=False), indent=2) + '\n')
-print(f'storage bindings: {len(bindings)} original imports bound, {len(checked)} subclasses checked (static derivation)')
+if not args.verify_only:
+    subprocess.run(['xcrun', 'ar', 'rcs', archive, directory / 'original-bindings.o'], check=True)
+# build-xnu-4k-baseline.sh cross-checks the RAM and Virtio transports through bindings.json beside each
+# archive and the object named after the archive (libRamBlock.a -> RamBlock.o).
+shutil.copyfile(obj_path, archive.with_name(archive.stem.removeprefix('lib') + '.o'))
+record = dict(candidate_sha256=plan['candidate_sha256'], compiled_object_sha256=hashlib.sha256(obj).hexdigest(),
+              subclasses=checked, bindings={name: hex(value) for name, value in sorted(bindings.items())},
+              archived=not args.verify_only, derivation='static', live_qualified=False)
+for name in ('storage-bindings.json', 'bindings.json'):
+    (directory / name).write_text(json.dumps(record, indent=2) + '\n')
+print(f'storage bindings: {len(bindings)} original imports bound, {len(checked)} subclasses checked (static derivation)'
+      + ('; verify only, nothing archived' if args.verify_only else ''))

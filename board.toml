@@ -10,15 +10,20 @@ os_profile = "ipados-17.7.11-21H461"
 description = "Xiaomi 10 Ultra (cas): iPadOS 17.7.11 on UniXNU"
 
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "XnuPrelink", "DarwinBoot"]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "VirtioMmioBlock", "RamBlock", "XnuPrelink", "DarwinBoot"]
 
 [kernel]
+# Storage archives (the UniXNU-alioth chain): ShengUfs is checked but not bound by itself, because the
+# force-loaded verified Virtio bundle carries the one binding object for both drivers' original
+# IOStorageFamily imports (two archives cannot both define the absolute names). The RAM transport is
+# linked as its bare object and cross-checked against that binding. The probe archive embeds the
+# owner-signed OS and SystemOS policies (scripts/build-owner-root-policies.py).
 defconfig = "cas_defconfig"
 config_fragments = ["arch:configs/common.config", "soc:configs/sm8250.config", "os:configs/ipados.config"]
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
 # cas-armcpu-asm-fix.py must run before component:ArmCpu: it stages ArmCpu with the
 # Darwin assembler separator fix that upstream ArmCpu 9066b53 still lacks.
-archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "component:ShengUfs", "build-storage-bindings.py --component NativeUfs --archive libShengUfs.a --directory build/sheng-ufs", "build-link-stubs.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py"]
+archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "component:ShengUfs", "build-storage-bindings.py --component NativeUfs --archive libShengUfs.a --directory build/sheng-ufs --verify-only", "component:VirtioMmioBlock", "component:RamBlock", "build-storage-bindings.py --component NativeRamBlock --archive libRamBlock.a --directory build/ram-block", "build-arm-driver.py VirtioMmioBlock --verified-root --verified-root-bundle", "build-storage-bindings.py --component NativeVirtioBlock --archive libVirtioMmioBlock.a --directory build/virtio-mmio-block-verified-bundle --include-object build/sheng-ufs/NativeUfs.o", "cas-verified-root-probe.py --component os --include-systemos", "build-link-stubs.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py"]
 
 [device_tree]
 source = "device:dts/cas.dts"
@@ -45,7 +50,9 @@ windows = [
 
 [payload]
 volume = "CAS_IOS17"
-size_mib = 64
+# The owner-root kernel carries the signed OS and SystemOS block hashes (~73 MB) and the payload files
+# take 120 MiB; the builder wants 5% headroom. uefi-cas CAS_PAYLOAD_SIZE allows up to 192 MiB.
+size_mib = 127
 loader = "firmware"
 title = "cas iPadOS 17"
 timeout = 3
@@ -53,10 +60,12 @@ panic_screen = true
 # sheng-pmgr=2 publishes the original ApplePMGR nub through ShengPlatformPower;
 # without it AMFI's early security init panics with "AMFI: No PMGR?".
 # native-ufs-stream/stream2: SM8250 routes the UFS host through apps SMMU streams 0xe0 and
-# 0x4e0 (NativeUfs defaults to sheng's 0x60). native-ufs-probe=10 is the read-only check
-# before anything is flashed: bring-up, READ CAPACITY, LUN0 GPT -> userdata -> its first two
-# blocks, all SCSI READ(10), then a panic screen with the evidence. No write is issued.
-kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-probe=10"]
+# 0x4e0 (NativeUfs defaults to sheng's 0x60). native-ufs-root=1 admits the root-device
+# personality, which publishes the SHNGROOT windows of userdata (m2a-001 proved the reads with
+# native-ufs-probe=10). -apfs_shared_datavolume lets keybagd take the shared-Data path: there is
+# no SEP here. panic_on_crash_disabled keeps one crashing daemon from panicking the bring-up.
+# No sheng-data-persist: the first root boots keep Data in RAM and write nothing to UFS.
+kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-root=1", "-apfs_shared_datavolume", "panic_on_crash_disabled=1"]
 
 [payload.adt]
 chip_id = "8011"
@@ -64,6 +73,10 @@ owned_memory_size = "0x130000000"
 cpu_regs = "0"
 psci_method = "smc"
 unique_chip_id = "required"
+# The Data seed reaches the kernel packed (DBRDISK1): /chosen/memory-map/PackedRAMDisk.
+packed_data_ramdisk = true
+# /chosen/root-matching: the OS window's APFS volume UUID (the same IPSW as alioth/umi/sheng).
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 
 [adt.root.string]
 hardware-model = "Qualcomm Technologies, Inc. xiaomi cas"
