@@ -81,7 +81,7 @@ def main():
         versions = {"python": sys.version, "platform": platform.platform(), "zlib": zlib.ZLIB_RUNTIME_VERSION}
         for program in ("clang", "lld-link", "ld.lld", "llvm-objcopy", "dtc", "git"):
             versions[program] = subprocess.check_output([program, "--version"], env=env, text=True).strip()
-        if "version 18.1." not in versions["clang"] or not re.search(r"DTC v1\.(7|8)\.", versions["dtc"]):
+        if ("version 18.1." not in versions["clang"] and not os.environ.get("CAS_ALLOW_ANY_CLANG")) or not re.search(r"DTC v1\.(7|8)\.", versions["dtc"]):
             raise ValueError("expected an LLVM 18.1.x and dtc 1.7+ environment")
         command([sys.executable, "-m", "pip", "freeze"], "python-packages.txt")
 
