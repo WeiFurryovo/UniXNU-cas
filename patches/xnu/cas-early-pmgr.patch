@@ -1,0 +1,16 @@
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -191,6 +191,13 @@
+ 	PE_parse_boot_argn("enforce_platform_action_safety", &gEnforcePlatformActionSafety,
+ 	    sizeof(gEnforcePlatformActionSafety));
+ 
++	{
++		// cas: AMFI waits for ApplePMGRNub from a thread call and panics "No PMGR?"
++		// before bsd_init runs on this board. Publish the nub here, as UniXNU-umi does,
++		// before configure() publishes the children that AMFI matches against.
++		extern "C" void sheng_pmgr_run(void);
++		sheng_pmgr_run();
++	}
+ 	return configure(provider);
+ }
+ 

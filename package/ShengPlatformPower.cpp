@@ -79,6 +79,9 @@ extern "C" void sheng_pmgr_run(void)
   if (!PE_parse_boot_argn("sheng-pmgr", &mode, sizeof(mode)) || !mode) sheng_pmgr_failed(1);
   sheng_pmgr_observation[15] = mode;
   sheng_pmgr_observation[1] = static_cast<uint32_t>(kIOReturnError);
+  // cas calls this from IOPlatformExpert::start and again from bsd_init; the
+  // second call finds the nub already published (stage 5) and has nothing to do.
+  if (sheng_pmgr_observation[0] == 5) return;
   if (mode > 3 || sheng_pmgr_observation[0]) sheng_pmgr_failed(2);
   sheng_pmgr_observation[0] = 1;
   kern_return_t result = OSKextLoadKextWithIdentifier("com.apple.driver.ApplePMGR");

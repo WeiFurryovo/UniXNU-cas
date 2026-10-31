@@ -1,1 +1,2 @@
 # Device XNU patches, applied after the arch, SM8250 and iPadOS 17 profile series.
+cas-early-pmgr.patch
