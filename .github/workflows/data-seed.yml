@@ -1,0 +1,149 @@
+name: Data seed
+
+# The writable Data volume's seed for the payload (unixnu build payload --data-ramdisk), built on a hosted
+# macOS runner because UniXNU's seed tools need hdiutil and diskutil apfs:
+#   scripts/prepare-owner-data-fixture.py  32 MiB APFS volume holding the OS volume's initial /private/var
+#   drivers/DarwinBoot/Test/packed_ramdisk  DBRDISK1 packing (nonzero pages only)
+#   scripts/seed-data-grow.py               container grown to size_gib (3 GiB is what UniXNU-alioth mounts)
+#
+# Only the OS member (044-76040-038.dmg) of the restore image is fetched, through HTTP ranges, and it is
+# deleted again; only the seed is uploaded. The seed holds files from the restore image, so it is
+# uploaded encrypted with the ARTIFACT_PASSPHRASE secret:
+#   openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in data-seed.tar.gz.enc -pass file:KEYFILE | tar xz
+#
+# Every run makes a new volume UUID; the report records it for CONFIG_XNU_OWNER_DATA_VOLUME_UUID.
+
+on:
+  # workflow_dispatch only reaches workflows on the default branch, so a push of this file to the
+  # work branch also runs it (with the input defaults).
+  push:
+    branches: [wf/m1]
+    paths: ['.github/workflows/data-seed.yml']
+  workflow_dispatch:
+    inputs:
+      size_gib:
+        description: Grown container size in GiB (3..1024); 0 keeps only the 32 MiB fixture
+        required: true
+        default: "3"
+      unixnu_ref:
+        description: UniXNU commit the seed tools come from
+        required: true
+        default: 67df14de69ae6f6ffc3480b30b70ce7667a3bd32
+
+permissions:
+  contents: read
+
+env:
+  IPSW_URL: https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw
+  OS_MEMBER: 044-76040-038.dmg
+  OS_MEMBER_SHA256: 3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d
+  SIZE_GIB: ${{ inputs.size_gib || '3' }}
+
+jobs:
+  seed:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Check out UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: ${{ inputs.unixnu_ref || '67df14de69ae6f6ffc3480b30b70ce7667a3bd32' }}
+          path: unixnu
+          persist-credentials: false
+
+      - name: Fetch the DarwinBoot submodule
+        run: git -C unixnu submodule update --init --depth 1 drivers/DarwinBoot
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Fetch the OS member
+        run: |
+          set -euo pipefail
+          trap 'echo "::error title=Fetch the OS member::$BASH_COMMAND"' ERR
+          mkdir -p "$RUNNER_TEMP/os"
+          python3 - <<'PY'
+          import hashlib, os, sys, zipfile
+          from pathlib import Path
+          sys.path.insert(0, 'unixnu/scripts')
+          from unixnu.ipsw import RangeFile
+          member, pin = os.environ['OS_MEMBER'], os.environ['OS_MEMBER_SHA256']
+          target = Path(os.environ['RUNNER_TEMP']) / 'os' / member
+          digest = hashlib.sha256()
+          with zipfile.ZipFile(RangeFile(os.environ['IPSW_URL'])) as archive, archive.open(member) as source, target.open('wb') as out:
+              while chunk := source.read(8 * 1024 * 1024):
+                  out.write(chunk)
+                  digest.update(chunk)
+          if digest.hexdigest() != pin:
+              raise SystemExit(f'{member} hashes to {digest.hexdigest()}, expected {pin}')
+          print(f'{member} {digest.hexdigest()}')
+          PY
+          df -h "$RUNNER_TEMP"
+
+      - name: Mount the OS volume read-only
+        run: |
+          set -euo pipefail
+          mount="unixnu/.cache/firmware/target-volumes/os-mount"
+          mkdir -p "$mount"
+          hdiutil attach -readonly -nobrowse -owners off -mountpoint "$mount" "$RUNNER_TEMP/os/$OS_MEMBER"
+
+      - name: Build the seed
+        run: |
+          set -euo pipefail
+          trap 'echo "::error title=Build the seed::$BASH_COMMAND"' ERR
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out" unixnu/build
+          python3 unixnu/scripts/prepare-owner-data-fixture.py --output "$RUNNER_TEMP/fixture"
+          cp "$RUNNER_TEMP/fixture/seed.json" "$out/fixture-seed.json"
+          python3 - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'unixnu/drivers/DarwinBoot/Test')
+          import packed_ramdisk
+          temp = Path(os.environ['RUNNER_TEMP'])
+          meta = packed_ramdisk.pack(temp / 'fixture/owner-data-32.cdr', temp / 'out/cas-data-32m.dbr')
+          (temp / 'out/cas-data-32m.dbr.json').write_text(json.dumps(meta, indent=2) + '\n')
+          PY
+          if [ "$SIZE_GIB" != 0 ]; then
+            python3 unixnu/scripts/seed-data-grow.py --gib "$SIZE_GIB" \
+              "$out/cas-data-32m.dbr" "$out/cas-data-${SIZE_GIB}g.dbr" | tee "$out/cas-data-${SIZE_GIB}g.dbr.json"
+          fi
+          uuid=$(python3 -c "import json,os;print(json.load(open(os.environ['RUNNER_TEMP']+'/out/fixture-seed.json'))['volume_uuid'])")
+          {
+            echo "unixnu $(git -C unixnu rev-parse HEAD)"
+            echo "os_member $OS_MEMBER_SHA256"
+            echo "size_gib $SIZE_GIB"
+            echo "volume_uuid $uuid"
+            (cd "$out" && shasum -a 256 *.dbr)
+          } | tee "$out/inputs.txt"
+          { echo '### Seed'; echo '```'; cat "$out/inputs.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Data volume UUID::$uuid"
+
+      - name: Unmount the OS volume
+        if: always()
+        run: |
+          hdiutil detach unixnu/.cache/firmware/target-volumes/os-mount -force || true
+          rm -rf "$RUNNER_TEMP/os" "$RUNNER_TEMP/fixture"
+
+      - name: Encrypt
+        env:
+          ARTIFACT_PASSPHRASE: ${{ secrets.ARTIFACT_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ARTIFACT_PASSPHRASE" ]; then
+            echo "::error::Set the ARTIFACT_PASSPHRASE secret: the seed holds files from the restore image"
+            exit 1
+          fi
+          tar -C "$RUNNER_TEMP/out" -czf - . \
+            | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:ARTIFACT_PASSPHRASE \
+                -out "$RUNNER_TEMP/data-seed.tar.gz.enc"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: cas-data-seed-encrypted
+          path: ${{ runner.temp }}/data-seed.tar.gz.enc
+          if-no-files-found: error
+          retention-days: 3
