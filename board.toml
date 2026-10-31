@@ -52,7 +52,7 @@ timeout = 3
 panic_screen = true
 # sheng-pmgr=2 publishes the original ApplePMGR nub through ShengPlatformPower;
 # without it AMFI's early security init panics with "AMFI: No PMGR?".
-kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2"]
+kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "cas-pmgr-probe=1"]
 
 [payload.adt]
 chip_id = "8011"

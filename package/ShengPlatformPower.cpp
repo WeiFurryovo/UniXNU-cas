@@ -64,25 +64,34 @@ static const OSMetaClass *lookup(const char *text)
   return meta;
 }
 
+// cas bring-up: a silent return leaves AMFI's asynchronous PMGR wait to panic
+// with "No PMGR?" and hides which step failed, so report the failing step here.
+__attribute__((noreturn)) static void sheng_pmgr_failed(unsigned where)
+{
+  sheng_pmgr_checkpoint();
+  panic("ShengPlatformPower: mode %llu failed at %u, stage %llu status 0x%llx",
+      sheng_pmgr_observation[15], where, sheng_pmgr_observation[0], sheng_pmgr_observation[1]);
+}
+
 extern "C" void sheng_pmgr_run(void)
 {
   unsigned mode = 0;
-  if (!PE_parse_boot_argn("sheng-pmgr", &mode, sizeof(mode)) || !mode) return;
+  if (!PE_parse_boot_argn("sheng-pmgr", &mode, sizeof(mode)) || !mode) sheng_pmgr_failed(1);
   sheng_pmgr_observation[15] = mode;
   sheng_pmgr_observation[1] = static_cast<uint32_t>(kIOReturnError);
-  if (mode > 3 || sheng_pmgr_observation[0]) { sheng_pmgr_checkpoint(); return; }
+  if (mode > 3 || sheng_pmgr_observation[0]) sheng_pmgr_failed(2);
   sheng_pmgr_observation[0] = 1;
   kern_return_t result = OSKextLoadKextWithIdentifier("com.apple.driver.ApplePMGR");
-  if (result) { sheng_pmgr_observation[1] = static_cast<uint32_t>(result); sheng_pmgr_checkpoint(); return; }
+  if (result) { sheng_pmgr_observation[1] = static_cast<uint32_t>(result); sheng_pmgr_failed(3); }
   const OSMetaClass *parent = lookup("ApplePMGR"), *nubMeta = lookup("ApplePMGRNub");
   if (!parent || parent != &ApplePMGR::gMetaClass || parent->getClassSize() != 0x4b8a8 ||
-      !nubMeta || nubMeta->getClassSize() != 0x740) { sheng_pmgr_checkpoint(); return; }
+      !nubMeta || nubMeta->getClassSize() != 0x740) sheng_pmgr_failed(4);
   sheng_pmgr_observation[2] = parent->getClassSize();
   void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-  if (!handle) { sheng_pmgr_checkpoint(); return; }
+  if (!handle) sheng_pmgr_failed(5);
   sheng_pmgr_static_init();
   result = OSMetaClass::postModLoad(handle);
-  if (result) { sheng_pmgr_observation[1] = static_cast<uint32_t>(result); sheng_pmgr_checkpoint(); return; }
+  if (result) { sheng_pmgr_observation[1] = static_cast<uint32_t>(result); sheng_pmgr_failed(6); }
   sheng_pmgr_observation[9] = ShengPlatformPower::gMetaClass.getInstanceCount();
   sheng_pmgr_observation[11] = nubMeta->getInstanceCount();
   ShengPlatformPower *provider = new ShengPlatformPower;
@@ -143,6 +152,11 @@ extern "C" void sheng_pmgr_run(void)
       OSSafeReleaseNULL(matched);
       OSSafeReleaseNULL(description);
       sheng_pmgr_checkpoint();
+      // cas bring-up probe: stop here to show that bsd_init published the nub.
+      unsigned probe = 0;
+      if (PE_parse_boot_argn("cas-pmgr-probe", &probe, sizeof(probe)) && probe) {
+        panic("ShengPlatformPower: published ApplePMGRNub, stage %llu", sheng_pmgr_observation[0]);
+      }
       return;
     }
     sheng_pmgr_observation[1] = kIOReturnSuccess;
@@ -155,5 +169,6 @@ extern "C" void sheng_pmgr_run(void)
   if (sheng_pmgr_observation[9] != sheng_pmgr_observation[10] ||
       sheng_pmgr_observation[11] != sheng_pmgr_observation[12]) sheng_pmgr_observation[1] = static_cast<uint32_t>(kIOReturnError);
   sheng_pmgr_observation[0] = 4;
+  if (mode == 2) sheng_pmgr_failed(7);
   sheng_pmgr_checkpoint();
 }
