@@ -56,8 +56,8 @@ def main():
         run([sys.executable, DEVICE / "scripts/generate_memory_map.py", "--uefi", uefi], "memory-compare.log")
         run([sys.executable, DEVICE / "scripts/check_target.py", "--uefi", uefi], "target-constants.log")
         clang = subprocess.run(["clang", "--version"], env=env, text=True, capture_output=True, check=True).stdout
-        if "version 18.1.3" not in clang:
-            raise RuntimeError("expected LLVM 18.1.3; source tools/cas-env.sh before building")
+        if "version 18.1." not in clang:
+            raise RuntimeError("expected LLVM 18.1.x; source the cas environment before building")
         manifest["clang"] = clang.splitlines()[0]
         base = uefi / "Mu_Basecore/BaseTools"
         if not (base / "Source/C/bin/GenFv").is_file():

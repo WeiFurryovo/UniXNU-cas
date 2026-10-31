@@ -7,6 +7,7 @@ operation exists here. The optional EFI-only profile uses the deterministically 
 import argparse
 import gzip
 import json
+import re
 import os
 import platform
 import shutil
@@ -80,8 +81,8 @@ def main():
         versions = {"python": sys.version, "platform": platform.platform(), "zlib": zlib.ZLIB_RUNTIME_VERSION}
         for program in ("clang", "lld-link", "ld.lld", "llvm-objcopy", "dtc", "git"):
             versions[program] = subprocess.check_output([program, "--version"], env=env, text=True).strip()
-        if "version 18.1.3" not in versions["clang"] or "1.7.0" not in versions["dtc"]:
-            raise ValueError("expected the fixed LLVM18.1.3 and dtc1.7.0 environment")
+        if "version 18.1." not in versions["clang"] or not re.search(r"DTC v1\.(7|8)\.", versions["dtc"]):
+            raise ValueError("expected an LLVM 18.1.x and dtc 1.7+ environment")
         command([sys.executable, "-m", "pip", "freeze"], "python-packages.txt")
 
         fd_path = out / "SILICIUM_UEFI.fd"

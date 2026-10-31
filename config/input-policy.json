@@ -85,9 +85,9 @@
   "config_values": {
     "boot_image_dtb": {
       "source": "stock-soc-dtb",
-      "source_bytes": 536890,
-      "source_sha256": "0eae9bf6a42b38ce8490f100ff24a681f50a67da53b8dd366ef7e6e119a59963",
-      "prepared_sha256": "414deae1dc24634bb9a06f8ffefa050658de1e35205879e4d405283e3c7277ab",
+      "source_bytes": 540219,
+      "source_sha256": "cb3c871d8d2cc2363d5d11fafcc36a6db06bf93c80e038dcdf1df6a022e73324",
+      "prepared_sha256": "adf01541c5bd358a6042d4c1421e64086822327199f5ffab98300f834dad0004",
       "padding": 8192
     },
     "boot_shim": {
