@@ -2,8 +2,8 @@
 [[source]]
 name = "sm8250"
 kind = "soc"
-git = "https://github.com/ht94911/UniXNU-sm8250-common.git"
-commit = "0c13f177195b9bfc51aa81ab209cc378e45d274f"
+git = "https://github.com/WeiFurryovo/UniXNU-sm8250-common.git"
+commit = "0ffc1f2ac884a97144867a423076d22106c76ea1"
 
 [[source]]
 name = "ArmCpu"
