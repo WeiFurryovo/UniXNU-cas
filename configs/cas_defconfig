@@ -35,9 +35,11 @@ CONFIG_XNU_OWNER_DATA_MOUNT=y
 # Volume UUID of the 32 MiB Data seed from .github/workflows/data-seed.yml run 41193517269
 # (cas-data-32m.dbr 07b588b2...); every seed build makes a new one.
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="1EDA187B-D502-4E9F-9A59-481F5BFC6D81"
-# boot_progress_poll for NativeUfs while CONFIG_XNU_BOOT_PROGRESS is off (scripts/build-link-stubs.py).
+# boot_progress_poll for NativeUfs when CONFIG_XNU_BOOT_PROGRESS is off (scripts/build-link-stubs.py); with it
+# on, the force-loaded libBootProgress.a defines the name and the stub member is never pulled.
 CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"
 # CONFIG_XNU_NATIVE_ADRENO is not set
 
 # Successful observations log and continue; optional GUI/storage experiments remain off.
-CONFIG_XNU_BOOT_PROGRESS=n
+# On-screen stage log and console (scripts/build-boot-progress.py): m2b-002 hung with nothing on screen.
+CONFIG_XNU_BOOT_PROGRESS=y
