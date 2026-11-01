@@ -89,6 +89,41 @@ jobs:
           mkdir -p "$mount"
           hdiutil attach -readonly -nobrowse -owners off -mountpoint "$mount" "$RUNNER_TEMP/os/$OS_MEMBER"
 
+      # seed-data-grow.py lists the APFS containers straight after hdiutil attach; on the hosted runner the
+      # container is not published yet (run 41193517269: "No APFS container found on the attached seed").
+      # Poll for it for up to a minute, and say what was attached if it never appears.
+      - name: Let the grow wait for the attached container
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('unixnu/scripts/seed-data-grow.py')
+          text = path.read_text()
+          old = """            listing = plistlib.loads(subprocess.check_output(['diskutil', 'apfs', 'list', '-plist']))
+                      container = None
+                      for entry in listing['Containers']:
+                          if any(s['DeviceIdentifier'] == store for s in entry.get('PhysicalStores', [])):
+                              container = entry['ContainerReference']
+          """
+          new = """            container = None
+                      for _ in range(60):
+                          listing = plistlib.loads(subprocess.check_output(['diskutil', 'apfs', 'list', '-plist']))
+                          for entry in listing['Containers']:
+                              if any(s['DeviceIdentifier'] in (store, store + 's1') for s in entry.get('PhysicalStores', [])):
+                                  container = entry['ContainerReference']
+                          if container:
+                              break
+                          __import__('time').sleep(1)
+                      if not container:
+                          print(attached, file=sys.stderr)
+                          subprocess.run(['diskutil', 'list', store])
+          """
+          if text.count(old) != 1:
+              raise SystemExit('seed-data-grow.py container lookup not found')
+          path.write_text(text.replace(old, new))
+          print('seed-data-grow.py now waits for its container')
+          PY
+
       - name: Build the seed
         run: |
           set -euo pipefail
