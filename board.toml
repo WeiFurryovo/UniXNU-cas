@@ -10,7 +10,7 @@ os_profile = "ipados-17.7.11-21H461"
 description = "Xiaomi 10 Ultra (cas): iPadOS 17.7.11 on UniXNU"
 
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "VirtioMmioBlock", "RamBlock", "XnuPrelink", "DarwinBoot"]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "VirtioMmioBlock", "RamBlock", "XnuPrelink", "DarwinBoot", "GopFramebuffer"]
 
 [kernel]
 # Storage archives (the UniXNU-alioth chain): ShengUfs is checked but not bound by itself, because the
@@ -23,7 +23,7 @@ config_fragments = ["arch:configs/common.config", "soc:configs/sm8250.config", "
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
 # cas-armcpu-asm-fix.py must run before component:ArmCpu: it stages ArmCpu with the
 # Darwin assembler separator fix that upstream ArmCpu 9066b53 still lacks.
-archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "component:ShengUfs", "build-storage-bindings.py --component NativeUfs --archive libShengUfs.a --directory build/sheng-ufs --verify-only", "component:VirtioMmioBlock", "component:RamBlock", "build-storage-bindings.py --component NativeRamBlock --archive libRamBlock.a --directory build/ram-block", "build-arm-driver.py VirtioMmioBlock --verified-root --verified-root-bundle", "build-storage-bindings.py --component NativeVirtioBlock --archive libVirtioMmioBlock.a --directory build/virtio-mmio-block-verified-bundle --include-object build/sheng-ufs/NativeUfs.o", "cas-verified-root-probe.py --component os --include-systemos", "build-link-stubs.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py"]
+archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "component:ShengUfs", "build-storage-bindings.py --component NativeUfs --archive libShengUfs.a --directory build/sheng-ufs --verify-only", "component:VirtioMmioBlock", "component:RamBlock", "build-storage-bindings.py --component NativeRamBlock --archive libRamBlock.a --directory build/ram-block", "build-arm-driver.py VirtioMmioBlock --verified-root --verified-root-bundle", "build-storage-bindings.py --component NativeVirtioBlock --archive libVirtioMmioBlock.a --directory build/virtio-mmio-block-verified-bundle --include-object build/sheng-ufs/NativeUfs.o", "cas-verified-root-probe.py --component os --include-systemos", "build-link-stubs.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py", "build-gop-legacy-display.py"]
 
 [device_tree]
 source = "device:dts/cas.dts"
@@ -65,7 +65,10 @@ panic_screen = true
 # native-ufs-probe=10). -apfs_shared_datavolume lets keybagd take the shared-Data path: there is
 # no SEP here. panic_on_crash_disabled keeps one crashing daemon from panicking the bring-up.
 # No sheng-data-persist: the first root boots keep Data in RAM and write nothing to UFS.
-kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-root=1", "-apfs_shared_datavolume", "panic_on_crash_disabled=1"]
+# offline-mobile-graphics-load/-legacy-*: the CPU-presented display (UniXNU-umi attempt 80's set). register+phase=4
+# publish NativeLegacyDisplay on the firmware frame buffer; pm/validate/transfer/cpu-present let it accept, copy and
+# retire single-layer BGRA frames; unit-scale=2 publishes display-scale 2 (540x1170 points) in /chosen.
+kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-root=1", "-apfs_shared_datavolume", "panic_on_crash_disabled=1", "offline-mobile-graphics-load=1", "offline-legacy-register=1", "offline-legacy-gop=1", "offline-legacy-phase=4", "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1", "offline-legacy-cpu-present=1", "offline-legacy-unit-scale=2"]
 
 [payload.adt]
 chip_id = "8011"

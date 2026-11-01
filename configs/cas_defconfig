@@ -43,3 +43,6 @@ CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"
 # Successful observations log and continue; optional GUI/storage experiments remain off.
 # On-screen stage log and console (scripts/build-boot-progress.py): m2b-002 hung with nothing on screen.
 CONFIG_XNU_BOOT_PROGRESS=y
+# CPU-presented display on the firmware frame buffer (GopFramebuffer NativeLegacyDisplay, scripts/build-gop-legacy-display.py),
+# started by the offline-legacy-* boot arguments in board.toml, as on UniXNU-umi.
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y

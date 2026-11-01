@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// From peter8889/UniXNU-ishtar@65592496e814ede46cc89721ee792b31912d38bd package/BootProgressMin.c, unchanged.
+// From peter8889/UniXNU-ishtar@65592496e814ede46cc89721ee792b31912d38bd package/BootProgressMin.c, plus the
+// scan-out hand-over GopFramebuffer's board probe calls (boot_progress_prepare_scanout and its companions, at the end).
 /*
  * Minimal boot progress observer for the ishtar bring-up.
  *
@@ -94,6 +95,7 @@ static struct {
 	unsigned rows;
 	unsigned bound;                 /* frame buffer validated, rendering allowed */
 	unsigned painted;               /* at least one full flush has happened */
+	unsigned handed_over;           /* the display owns the scan-out buffer: never draw again */
 	char     model[BP_MAX_ROWS][BP_MAX_COLS + 1];
 	uint32_t model_fg[BP_MAX_ROWS];
 	uint32_t model_bg[BP_MAX_ROWS];
@@ -371,7 +373,7 @@ bp_build(void)
 static void
 bp_refresh(void)
 {
-	if (!g_screen.bound) {
+	if (!g_screen.bound || g_screen.handed_over) {
 		return;
 	}
 	bp_build();
@@ -729,3 +731,40 @@ boot_progress_exit(int pid, const char *name, int rv, unsigned namespace_id, uin
 	bp_copy(g_state.exit_line, line);
 	bp_refresh();
 }
+
+/* ------------------------------------------------------------------------- scan-out hand-over */
+
+/* GopFramebuffer copies the compositor's frames into the same buffer this panel draws in, so the board probe
+ * (LegacyDisplayProbe.cpp, native_legacy_prepare_scanout) asks for it before the first copy. From then on the panel
+ * draws nothing, while boot_progress_active() stays true so the console does not take the screen back either. With
+ * one CPU no refresh can be in flight on another core, and the probe calls this from thread context, so a refresh
+ * on this CPU has finished before the call; returning 1 at once is the whole hand-over. It is never undone: the
+ * frame the display copies next must not be overwritten. */
+int
+boot_progress_prepare_scanout(void)
+{
+	g_screen.handed_over = 1;
+	__asm__ volatile ("dmb ish" ::: "memory");
+	return 1;
+}
+
+/* Called only after prepare failed, which it does not here. */
+void
+boot_progress_cancel_scanout(void)
+{
+}
+
+/* sheng keeps a heartbeat pulse in the display's mapping; this observer has none. 0 declines the mapping. */
+int
+boot_progress_pulse_anchor(uintptr_t base, uint64_t bytes, unsigned width, unsigned height, unsigned rowbytes)
+{
+	(void) base;
+	(void) bytes;
+	(void) width;
+	(void) height;
+	(void) rowbytes;
+	return 0;
+}
+
+/* Extra panel rows sheng's key-store probe writes (KeyStoreProbe.cpp); kept so it links, not drawn. */
+char boot_progress_ext[8][48];
