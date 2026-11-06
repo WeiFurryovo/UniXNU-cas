@@ -840,7 +840,7 @@ extern volatile uint64_t native_data_persist_errors __attribute__((weak_import))
 
 /* The physical keys' row (ButtonProbe.cpp): st 2 = polling, the PON and GPIO 6 APIDs, the pressed mask, reports sent. */
 extern char native_buttons_short[48] __attribute__((weak_import));
-/* The Adreno 650 probe's rows (GpuProbe.cpp, cas-gpu=1). */
+/* The Adreno 650 probe's rows (GpuProbe.cpp, cas-gpu=1..11; formats in its header). */
 extern char native_gpu_short[6][48] __attribute__((weak_import));
 
 static void
@@ -896,6 +896,8 @@ bp_banner_thread(void *argument, int result)
 			static const unsigned gpu_rows[6] = {0, 1, 2, 4, 5, 6};   /* all but the DATA and FREQ rows */
 			unsigned g;
 
+			/* Every tick, whole rows: a row the probe rewrites (cas-gpu=11's LIVE row every 2 s, its ST progress) is
+			 * re-copied each time, and a row read while the probe copies it is torn for one tick at most. */
 			for (g = 0; g < 6; g++) {
 				if (!native_gpu_short[g][0]) {
 					continue;
@@ -905,7 +907,8 @@ bp_banner_thread(void *argument, int result)
 				}
 			}
 		}
-		if (&native_buttons_short && native_buttons_short[0] && !(&native_gpu_short && native_gpu_short[4][0])) {
+		/* Banner row 4 carries GPU row 3 (gpu_rows above), so the keys take it only while that row is empty. */
+		if (&native_buttons_short && native_buttons_short[0] && !(&native_gpu_short && native_gpu_short[3][0])) {
 			for (slot = 0; slot < 48; slot++) {
 				boot_progress_ext[4][slot] = native_buttons_short[slot];   /* over the FTS row */
 			}
@@ -918,17 +921,20 @@ bp_banner_thread(void *argument, int result)
 		}
 		for (slot = 0; slot < 8; slot++, row++) {
 			const char *text = boot_progress_ext[slot];
+			unsigned ended = 0;
 
 			if (text[0] == 0) {
 				continue;
 			}
-			for (column = 0; column < g_screen.cols && column < 48; column++) {
-				char character = column < 47 ? text[column] : 0;
+			/* All 47 columns: past the row's end, blanks, so a row that got shorter leaves no characters of its
+			 * longer predecessor behind (on a static screen no new frame covers them). */
+			for (column = 0; column < g_screen.cols && column < 47; column++) {
+				char character = ended ? 0 : text[column];
 
-				bp_cell(row, column, character >= 32 ? character : ' ', BP_WHITE, BP_INK);
 				if (character == 0) {
-					break;
+					ended = 1;
 				}
+				bp_cell(row, column, character >= 32 ? character : ' ', BP_WHITE, BP_INK);
 			}
 			bp_banner_clean(row);
 		}

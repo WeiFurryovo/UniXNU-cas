@@ -33,7 +33,21 @@
 //      init_image, mem_setup, the segment copy, auth_and_reset (IRQs masked across each call); then CP_SET_SECURE_MODE(0) through
 //      the ring; then the GPU interrupt (DT kgsl_3d0_irq: SPI 300, level high) through ArmCpu's armcpu_spi_attach, and a CP_NOP
 //      whose fence must raise it (the fence waits sleep on it from then on).
-// Modes 11 and above (alioth's user clients and Metal) are not ported: cas_gpu_probe refuses them.
+//  11  as 10, then, only once the interrupt fired (alioth's publish + selfTest + heartbeat, f188378 GpuProbe.cpp:1240-1294,
+//      1296-1516, 1687-1756, and its restart hook :1867-1898): the board's GPU restart installed for the driver's hangcheck
+//      (native_adreno_set_restart; on a hang it reruns hw_init, CP_SQE_INSTR_BASE, CP_SQE_CNTL, the ring restart and CP_ME_INIT),
+//      NativeAdrenoSubmit attached to ring 0 and the kernel VM, NativeAdrenoTimer on CP_ALWAYS_ON_COUNTER (reads only), and the
+//      device published (native_adreno_publish: an IOService "NativeAdrenoGpu" on the platform expert with the A650's facts below,
+//      table switching by the CPU (mode 1: no SMMU aperture SMC is made here), and the driver's hangcheck thread, every 500 ms).
+//      Then two self-test rounds of the user-client path from the kernel (newUserClient type 0x4147, a refused second open,
+//      Query, GetDeviceInfo, two 4 KiB BOs mapped at client IOVAs 0x20004000/0x20005000 and CPU-mapped through
+//      clientMemoryForType, an IB of three CP_MEM_WRITEs 0x0badc0de/0xfeed0001/0x600d0003 into the target BO, Submit, WaitFence
+//      (2 s), GetTimestamp, clientClose), and alioth's replay round of a logged client IB over 48 bytes (none exists on cas, so
+//      it is skipped). cas-gpu-selftest=0 skips the rounds; cas-gpu-lowiova=1 maps the BOs at 0x310000/0x311000 and
+//      cas-gpu-nop=1 sends a single CP_NOP instead (alioth's pipa-gpu-lowiova/-nop diagnostics). Then the thread stays: a live
+//      row every 2 s for the rest of the boot. User space can open the published service only with the GPU addon's plugin,
+//      which cas does not carry.
+// Mode 12 and above (alioth's metal(): the staged accelerator for Metal) are not ported: cas_gpu_probe refuses them.
 //
 // GPU frequency (the hard rule: never above cas's speed bin). The GMU never picks a frequency of its own: it runs the level the
 // host votes, by index into the performance table the host sent at HFI start (Linux v6.6 a6xx_hfi.c a6xx_hfi_send_perf_table
@@ -60,10 +74,13 @@
 // on the GPU SMMU (SMR 5 and sCR0, its "PRE" row) are diagnostics of a past failure and are left out. Mode 9 writes the GPU SMMU
 // (S2CR 0/1/4/5 if FAULT, context bank 0, SMR/S2CR 0/1/4/5, CB0 ACTLR/TLBIALL/TLBSYNC), the GPU register space (hw_init, CP_SQE_*,
 // CP_RB_*, CP_SCRATCH), the GMU's SPTPRAC clock control and CX busy counter (hw_init), and the five kernel buffers. Mode 10 adds
-// the PIL SMCs (TrustZone then owns 0x8681a000..0x8681bfff), CP packets and the GIC distributor's SPI 300 configuration.
+// the PIL SMCs (TrustZone then owns 0x8681a000..0x8681bfff), CP packets and the GIC distributor's SPI 300 configuration. Mode 11
+// adds GPU page tables for each client VM (system memory), the context bank's TTBR0 (the CPU switches it with the GPU idle), CP
+// packets through ring 0, the self test's two BOs, and, only after a hang, the restart's GPU register writes (as mode 9's).
 // Not ported: alioth's UCHE row and its register dump to the log (reads only), its boot-arg knobs (pipa-gpu-hwcg, -gmem16m,
-// -apriv: here hw_init always runs the table, Linux's GMEM base 0 and APRIV on; the driver's own pipa-gpu-no-update stays unset)
-// and the write-combine switches that only user clients (mode 11) read.
+// -apriv: here hw_init always runs the table, Linux's GMEM base 0 and APRIV on; the driver's own pipa-gpu-no-update stays unset),
+// its memory benchmark, the dram_read32 hook (an uncached second mapping of a BO page, for diagnostics only), the hang, fault,
+// UCHE, submit and CP-error rows of its heartbeat (they need 119-character log rows) and metal() (mode 12).
 //
 // Banner rows (cas-banner=1: banner rows 0, 1, 2, 4, 5 and 6; at most 47 characters). Modes 1-6:
 //   0 GPU m<mode> <gcc> <cc> <smmu> <gpu> io<err> bin<n> cx<on> ck<on> s<step>
@@ -104,12 +121,31 @@
 //     (mode 10, replaces HFI) success: IRQ ok a0 ga003 c<n>><more than n> f1 s100000 n0 m0  (ga003: group 1, enabled, level,
 //     priority 0xa0, ga002 if the secure side owns the group bit; s bit 20 = CACHE_FLUSH_TS; ok needs attach 0, the fence and at
 //     least one more interrupt during the NOP)
+// Mode 11 runs only after modes 9 and 10 succeeded, so their detailed rows give way (a failure in 9 or 10 leaves its own rows and
+// mode 11 never starts). Row 0 keeps the summary and step, row 5 the GX row; then:
+//   1 OK cp<1> zap<1> irq<1> m <marker>                    (replaces CP) success: OK cp1 zap1 irq1 m a6500c0d
+//   2 PUB run                                               while the device is published, then (replaces CPS)
+//     PUB <ok|failed|noobj> s<Submit attach> t<Timer attach> p<publish> b<IAS>/<OAS> tm<table mode>
+//     success: PUB ok s0 t0 p0 b<n>/<n> tm1   (b: the GPU context's input/output address bits, both nonzero; tm1 = the CPU
+//     switches TTBR0, tm2 = the CP does, which needs an SMMU aperture call this board does not make; t nonzero only costs the
+//     timestamp, the device is published without a timer)
+//   3 ST r<round> <what>                                    during the self test (open, wait f<fence>, close, done), then
+//     ST <ok|bad> <round 1> <round 2> f<first error>@<its step> s<steps passed>/<steps> r1 <passed>/<steps> rp<replay>
+//     (replaces ZAP) success: ST ok 4 4 f0@0 s36/36 r1 18/18 rp0   (a round's result = target words matching: 3 markers plus
+//     the 0xdeadbeef sentinel, so 3 is also a pass; -1 = the round stopped before its fence; 18 steps a round, see ucRound;
+//     rp: replay rounds' result, 0 = none run). ST skip with cas-gpu-selftest=0; ST nosvc if the service is missing.
+//   4 LIVE i<GPU irqs> s<submissions>/<completed> t<timeouts> h<hangs>/<restarts> u<opened>/<closed> <uptime>s
+//     (replaces IRQ, rewritten every 2 s by the heartbeat) success after the self test, before any client: LIVE i<n> s2/2 t0
+//     h0/0 u2/2 <s>s, with the uptime growing by 2 every beat and s == completed; i grows with every fence.
 // Steps (row 0, native_gpu_step): 1-4 maps/run/fuse, 50 cmd-db, 70 clocks, 60 GMU state, 79 cold start entry, 80+n SMMU context
 // step n, 90 cold start running, 97 cold start done / 98 failed, 100 GX vote, 101 GX on, 110+n GPU SMMU context step n, 120 CP
 // buffers, 121 hw_init, 122 ring, 123 CP_ME_INIT, 124 marker, 125 marker read back, 130-134 zap (metadata, init_image, mem_setup,
-// copy, auth_and_reset), 135 secure-mode exit, 140 interrupt, 141 interrupt ok, 99 finished.
+// copy, auth_and_reset), 135 secure-mode exit, 140 interrupt, 141 interrupt ok, 150 publish, 155/156 self-test round 1/2, 157
+// replay, 99 finished (in mode 11 with the device published, the thread then stays in the heartbeat).
 // The rows are written 5 s after the late probe, as alioth does, so the display already runs if a read hangs the bus.
 #include <IOKit/IOLib.h>
+#include <IOKit/IOService.h>
+#include <IOKit/IOUserClient.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
@@ -140,19 +176,39 @@ boolean_t ml_at_interrupt_context(void);
 int get_preemption_level(void);
 IOReturn armcpu_spi_attach(uint32_t intid, bool edge, void (*handler)(void *), void *context, uint32_t *readback,
                            uint64_t *router) __attribute__((weak_import));
-// NativeAdrenoMemory.cpp records the steps of a BO's release here; NativeAdrenoPublish.cpp (the user-client half, mode 11)
-// defines them. That object is not in this archive, so these weak stand-ins do (a strong definition, once added, wins).
-__attribute__((weak)) volatile uint32_t native_adreno_close_step[8];
-__attribute__((weak)) void native_adreno_close_step_set(uint32_t n) {native_adreno_close_step[0] = n;}
 // NativeAdrenoMemory.cpp's release path asks the kernel which process maps a page (weak_import; a static kernel link refuses an
 // undefined one). This kernel has no such probe: 0 = "no process maps it", as UniXNU-alioth's BootProgressStubs.c defines it.
+// (native_adreno_close_step and its setter, stood in for here until mode 10, are NativeAdrenoPublish.cpp's own now.)
 __attribute__((weak)) unsigned int native_pmap_user_mappings(unsigned int, void **, uint64_t *, char *) {return 0;}
+// Mode 11's objects weak-import two more things the board provides on alioth: NativeAdrenoSubmit.cpp a DVFS level table it copies
+// into each job record (alioth BootProgressStubs.c: zero = no levels; cas has no GPU DCVS), and NativeAdrenoPublish.cpp the UFS log
+// export of alioth's BootLog.c (the render server's pipeline caches), which cas does not have: -1 = refused, the answer the driver
+// gives itself without one. The driver's other diagnostics alioth stubs (native_adreno_io_coherent, native_adreno_import_stage)
+// are defined by NativeAdrenoVm.cpp and NativeAdrenoMemory.cpp, which this archive builds, so they need no stand-in.
+__attribute__((weak)) volatile uint32_t native_gpu_dcvs[15];
+__attribute__((weak)) int boot_log_export_put(uint32_t, uint32_t, uint32_t, const void *, uint32_t) {return -1;}
 }
 #include "NativeAdrenoGmuContext.h"
 #include "NativeAdrenoGpuContext.h"
 #include "NativeAdrenoRing.h"
 #include "NativeAdrenoCpInit.h"
 #include "NativeAdrenoIrq.h"
+#include "NativeAdrenoSubmit.h"
+#include "NativeAdrenoTimer.h"
+#include "NativeAdrenoABI.h"
+#include "NativeAdrenoUserClient.h"
+extern "C" {
+// Mode 11: the driver's publication (NativeAdrenoPublish.cpp), its restart hook setter (NativeAdrenoRestart: NativeAdrenoSubmit.h),
+// and the IB record NativeAdrenoSubmit.cpp keeps of the last four client submissions (alioth's replay reads it).
+IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
+                               const NativeAdrenoTimer *, const NativeAdrenoAbiDeviceInfo *, uint32_t, uint32_t);
+uint32_t native_adreno_publish_stats(uint32_t *);
+IOService *native_adreno_published_service();
+void native_adreno_set_restart(NativeAdrenoRestart restart, void *cookie);
+extern volatile uint32_t native_adreno_ib_log[4][6 + 96 + 96 + 2 + 16 + 80];
+extern volatile uint32_t native_adreno_ib_log_count;
+extern volatile uint32_t native_adreno_cp_aperture[4];
+}
 
 namespace {
 constexpr uint64_t kPhys[GPB_WINDOWS] = {GPB_GCC_GPU_PAGE, GPB_GCC_VOTE_PAGE, GPB_GPUCC_BASE, GPB_SMMU_BASE, GPB_GPU_BASE,
@@ -955,6 +1011,271 @@ bool gpuInterrupt() {
     return ok;
 }
 
+// Mode 11 (alioth f188378 GpuProbe.cpp:1240-1294). The device's facts for the Vulkan driver, as alioth publishes them: chip id
+// 0x06050002 (Linux adreno_device.c; Turnip's Darwin backend makes GPU id 650 of it), GMEM 1 MiB + 128 KiB at base 0 (the a650
+// family's, as Linux reports it; alioth's pipa-gpu-gmem16m is not ported), the UCHE trap base hw_init writes, the client VA window
+// 0x20000000 + 1.5 GiB (above the kernel buffers, below the 2 GiB aperture), highest bank bit 16 (cas's DT qcom,highest-bank-bit
+// = <0x10>, as hw_init's UBWC setup), swizzle levels 2 and 3, eight-channel macrotiles, UBWC 4.0 of the SM8250.
+constexpr unsigned kRowOk = 1, kRowPublish = 2, kRowSelfTest = 3, kRowLive = 4;
+NativeAdrenoAbiDeviceInfo kDeviceInfo = {0x06050002u, 0x120000u, 0, 0x1fffffffff000ull, 0x20000000ull, 0x60000000ull,
+                                         16, 6, 1, 4, NativeAdrenoDeviceClientIova, 0};
+static_assert(0x1fffffffff000ull == 0x0001fffffffff000ull, "the UCHE trap base hwInit writes");
+NativeAdrenoSubmit *gSubmit;
+NativeAdrenoTimer *gTimer;
+NativeAdrenoTimeIo gTimerIo{nullptr, naRead};
+// The client's last logged IB (NativeAdrenoSubmit.cpp's record), rebuilt for one replay round from the kernel's own VM.
+uint32_t gReplayIb[192];
+uint32_t gReplayWords;
+int gReplayResult;
+extern "C" {
+// [0] Submit attach, [1] Timer attach, [2] publish, [3] steps passed, [4] steps, [5] first error, [6] its step, [7] the first
+// clientMemoryForType status, [8]/[9] round results, [10..13] the target words, [14]/[15] round 1's steps/passed, [16..19] round
+// 1's target words (alioth's native_gpu_publish).
+uint32_t native_gpu_publish[20];
+// The board restart: [0] how many, [1] its step (1 ring restart failed, 2 past it, 3 CP init failed, 4 past it).
+volatile uint32_t native_gpu_restart[2];
+}
+// Rows are formatted aside and copied whole, so the banner thread (every 500 ms) never reads a half-written row for long.
+void putRow(unsigned row, const char *text) {
+    char *out = native_gpu_short[row];
+    size_t i = 0;
+    for (; i + 1 < 48 && text[i]; ++i) out[i] = text[i];
+    for (; i < 48; ++i) out[i] = 0;
+}
+void publishRow(const char *what) {
+    const uint32_t *p = native_gpu_publish;
+    char line[48];
+    snprintf(line, sizeof line, "PUB %s s%x t%x p%x b%u/%u tm%u", what, p[0], p[1], p[2], NativeAdrenoGpuContextInputBits(),
+             native_gpu_context.output_bits, native_adreno_cp_aperture[3]);
+    putRow(kRowPublish, line);
+}
+
+// alioth's nativeGpuRestart (:1867-1890), the driver's hangcheck hook: what cpStart does, minus the buffers (a6xx_recover: hw_init
+// and a6xx_cp_init; the ring's restart(completed) reprograms RB/WPTR/RPTR first). The driver passes a null cookie.
+IOReturn gpuRestart(void *, NativeAdrenoRing *ring, uint32_t completed) {
+    if (!ring || !gCpInit) return kIOReturnNotReady;
+    native_gpu_restart[0] = native_gpu_restart[0] + 1;
+    hwInit();
+    gw64(0x830, gNb[0].iova);                                           // CP_SQE_INSTR_BASE
+    gw(0x808, 1);                                                       // CP_SQE_CNTL
+    IOReturn status = ring->restart(completed);
+    native_gpu_restart[1] = status ? 1u : 2u;
+    if (status) return status;
+    gCpInit->reopen();
+    NativeAdrenoCpInitConfig config{gNb[0].iova, 0, 1, 6};
+    uint32_t fence = 0;
+    status = gCpInit->run(&gRio, ring, &config, &fence);
+    native_gpu_restart[1] = status ? 3u : 4u;
+    return status;
+}
+
+// The submission object on ring 0, the CP always-on counter as the GPU clock, and the published device.
+bool publish() {
+    uint32_t *p = native_gpu_publish;
+    stage(150);
+    putRow(kRowPublish, "PUB run");
+    NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
+    gSubmit = new NativeAdrenoSubmit;
+    gTimer = new NativeAdrenoTimer;
+    if (!vm || !gSubmit || !gTimer) {publishRow("noobj"); return false;}
+    native_adreno_set_restart(gpuRestart, nullptr);
+    p[0] = uint32_t(gSubmit->attach(vm, gRing));
+    p[1] = uint32_t(gTimer->attach(&gTimerIo, NativeAdrenoTimeCp));
+    // The context's own input address size (alioth 2026-10-31: a constant below 33 refuses every user client's VA window).
+    p[2] = uint32_t(native_adreno_publish(vm, gSubmit, gRing, &gClock, p[1] ? nullptr : gTimer, &kDeviceInfo,
+                                          NativeAdrenoGpuContextInputBits(), native_gpu_context.output_bits));
+    publishRow(p[0] || p[2] ? "failed" : "ok");
+    return !p[0] && !p[2];
+}
+
+// alioth's ucRound (:1296-1457): exactly the path a user-space client takes, minus the Mach trap. 18 steps when it gets through:
+// open, refused second open, Query, GetDeviceInfo, its chip/GMEM check, two BoAlloc, two BoMap, two BoCpuMap, type 0 refused,
+// both CPU views mapped, the IB built, Submit, WaitFence, GetTimestamp, clientClose. Returns the target words that match (of 4)
+// or -1. The round's progress goes to the ST row so a round that never returns leaves where it stopped.
+IOReturn ucCall(IOUserClient *uc, uint32_t method, const void *in, void *out) {
+    IOExternalMethodArguments a{};
+    a.version = kIOExternalMethodArgumentsCurrentVersion;
+    a.selector = method;
+    const size_t is = NativeAdrenoUserClient::inputSize(method), os = NativeAdrenoUserClient::outputSize(method);
+    a.structureInput = is ? in : nullptr;
+    a.structureInputSize = uint32_t(is);
+    a.structureOutput = os ? out : nullptr;
+    a.structureOutputSize = uint32_t(os);
+    return uc->externalMethod(method, &a, nullptr, nullptr, nullptr);
+}
+void selfTestMark(unsigned round, const char *what, unsigned long long value = ~0ull) {
+    char line[48];
+    if (value == ~0ull) snprintf(line, sizeof line, "ST r%u %s", round, what);
+    else snprintf(line, sizeof line, "ST r%u %s%llu", round, what, value);
+    putRow(kRowSelfTest, line);
+}
+int ucRound(IOService *svc, unsigned round) {
+    uint32_t *p = native_gpu_publish;
+    auto step = [&](IOReturn status) {
+        const uint32_t at = p[4]++;
+        if (!status) ++p[3];
+        else if (!p[5]) {p[5] = uint32_t(status); p[6] = at;}
+        return !status;
+    };
+    selfTestMark(round, "open");
+    constexpr UInt32 kPluginOpenType = 0x4147;   // NativeAdrenoPublish.cpp NativeAdrenoPluginOpenType
+    IOUserClient *uc = nullptr;
+    if (!step(svc->newUserClient(kernel_task, nullptr, kPluginOpenType, nullptr, &uc)) || !uc) return -1;
+    IOUserClient *second = nullptr;
+    step(svc->newUserClient(kernel_task, nullptr, kPluginOpenType, nullptr, &second) == kIOReturnBusy ? kIOReturnSuccess
+                                                                                                      : kIOReturnError);
+    if (second) second->release();
+    NativeAdrenoAbiParams params{};
+    step(ucCall(uc, NativeAdrenoMethodQuery, nullptr, &params));
+    NativeAdrenoAbiDeviceInfo info{};
+    step(ucCall(uc, NativeAdrenoMethodGetDeviceInfo, nullptr, &info));
+    step(info.chip_id == kDeviceInfo.chip_id && info.gmem_bytes == kDeviceInfo.gmem_bytes ? kIOReturnSuccess : kIOReturnError);
+    NativeAdrenoAbiBoAlloc alloc{4096, 12, 0};
+    NativeAdrenoAbiBoAllocReply ib{}, tgt{};
+    int matched = -1;
+    IOMemoryDescriptor *desc[2] = {};
+    IOMemoryMap *maps[2] = {};
+    if (step(ucCall(uc, NativeAdrenoMethodBoAlloc, &alloc, &ib)) && step(ucCall(uc, NativeAdrenoMethodBoAlloc, &alloc, &tgt))) {
+        // cas-gpu-lowiova=1 (alioth's pipa-gpu-lowiova): both BOs inside the range the kernel context already proved reachable
+        // (0x310000 is the first free page above its memptrs/pwrup/scratch buffers).
+        unsigned lowIova = 0;
+        PE_parse_boot_argn("cas-gpu-lowiova", &lowIova, sizeof lowIova);
+        const uint64_t ibIova = lowIova ? 0x310000ull : 0x20004000ull;
+        const uint64_t tgtIova = lowIova ? 0x311000ull : 0x20005000ull;
+        NativeAdrenoAbiBoMap mapIb{ib.handle, ibIova, 1, 0, 2, 0}, mapTgt{tgt.handle, tgtIova, 3, 0, 2, 0};
+        NativeAdrenoAbiBoMapReply r{};
+        NativeAdrenoAbiBoCpuMap cmIb{ib.handle}, cmTgt{tgt.handle};
+        NativeAdrenoAbiBoCpuMapReply crIb{}, crTgt{};
+        if (step(ucCall(uc, NativeAdrenoMethodBoMap, &mapIb, &r)) && step(ucCall(uc, NativeAdrenoMethodBoMap, &mapTgt, &r)) &&
+            step(ucCall(uc, NativeAdrenoMethodBoCpuMap, &cmIb, &crIb)) && step(ucCall(uc, NativeAdrenoMethodBoCpuMap, &cmTgt, &crTgt))) {
+            IOOptionBits opt[2] = {};
+            const uint32_t tokens[2] = {crIb.token, crTgt.token};
+            bool mapped = true;
+            for (int i = 0; i < 2; ++i) {
+                const IOReturn status = uc->clientMemoryForType(tokens[i], &opt[i], &desc[i]);
+                if (!p[7]) p[7] = uint32_t(status);
+                if (status || !desc[i]) {mapped = false; continue;}
+                maps[i] = desc[i]->createMappingInTask(kernel_task, 0, opt[i]);
+                if (!maps[i]) {mapped = false; if (!p[7]) p[7] = 0xbad;}
+            }
+            // Type 0 must be refused.
+            IOMemoryDescriptor *none = nullptr;
+            IOOptionBits o = 0;
+            step(uc->clientMemoryForType(0, &o, &none) != kIOReturnSuccess && !none ? kIOReturnSuccess : kIOReturnError);
+            step(mapped ? kIOReturnSuccess : kIOReturnNoMemory);
+            if (mapped) {
+                volatile uint32_t *iw = reinterpret_cast<volatile uint32_t *>(maps[0]->getVirtualAddress());
+                volatile uint32_t *tw = reinterpret_cast<volatile uint32_t *>(maps[1]->getVirtualAddress());
+                for (unsigned i = 0; i < 1024; ++i) tw[i] = 0xdeadbeef;
+                const uint32_t values[3] = {0x0badc0deu, 0xfeed0001u, 0x600d0003u};
+                // Three CP_MEM_WRITEs (opcode 0x3d: address lo/hi, data) to consecutive target words.
+                uint32_t words[12];
+                bool built = true;
+                for (unsigned i = 0; i < 3; ++i) {
+                    built = built && AdrenoPM4Type7(0x3d, 3, &words[i * 4]) == AdrenoPM4Success;
+                    words[i * 4 + 1] = uint32_t(tgtIova + i * 4); words[i * 4 + 2] = uint32_t(tgtIova >> 32);
+                    words[i * 4 + 3] = values[i];
+                }
+                // cas-gpu-nop=1 (alioth's pipa-gpu-nop): a single CP_NOP instead, to tell an IB fetch stop from a write stop.
+                unsigned nopOnly = 0;
+                PE_parse_boot_argn("cas-gpu-nop", &nopOnly, sizeof nopOnly);
+                if (gReplayWords && gReplayWords <= 192) {
+                    for (unsigned i = 0; i < gReplayWords; ++i) iw[i] = gReplayIb[i];
+                } else if (nopOnly) {
+                    uint32_t nop = 0;
+                    built = built && AdrenoPM4Type7(0x10, 0, &nop) == AdrenoPM4Success;
+                    iw[0] = nop;
+                    for (unsigned i = 1; i < 12; ++i) iw[i] = 0;
+                } else {
+                    for (unsigned i = 0; i < 12; ++i) iw[i] = words[i];
+                }
+                __asm__ volatile("dsb sy" ::: "memory");
+                NativeAdrenoAbiSubmit submit{};
+                submit.buffer_count = 1;
+                submit.buffers[0] = {ib.handle, ibIova, gReplayWords ? gReplayWords * 4u : sizeof words};
+                NativeAdrenoAbiSubmitReply sr{};
+                if (step(built ? kIOReturnSuccess : kIOReturnInternalError) && step(ucCall(uc, NativeAdrenoMethodSubmit, &submit, &sr))) {
+                    // 2 s (alioth: the first fence completes in ~13 us; a longer wait tells a slow GPU from a ring never consumed).
+                    selfTestMark(round, "wait f", static_cast<unsigned long long>(sr.fence));
+                    NativeAdrenoAbiWaitFence wait{sr.fence, 2000000000ull};
+                    const bool completed = step(ucCall(uc, NativeAdrenoMethodWaitFence, &wait, nullptr));
+                    // The target is read whether or not the fence came back: the CP writes the markers before the fence.
+                    __asm__ volatile("dsb sy" ::: "memory");
+                    p[10] = tw[0]; p[11] = tw[1]; p[12] = tw[2]; p[13] = tw[3];
+                    if (completed)
+                        matched = (tw[0] == values[0]) + (tw[1] == values[1]) + (tw[2] == values[2]) + (tw[3] == 0xdeadbeef);
+                }
+                NativeAdrenoAbiTimestamp ts{};
+                step(ucCall(uc, NativeAdrenoMethodGetTimestamp, nullptr, &ts));
+            }
+        }
+    }
+    // Teardown, marked: releasing a BO's mapping while its job's fence is outstanding is where a round can block.
+    selfTestMark(round, "close");
+    for (auto *m : maps) if (m) m->release();
+    for (auto *d : desc) if (d) d->release();
+    step(uc->clientClose());
+    uc->release();
+    selfTestMark(round, "done");
+    return matched;
+}
+// alioth's selfTest (:1458-1516): two rounds (the second proves the client slot and the IOVAs recycle after clientClose), then
+// the replay of a logged client IB over 48 bytes if one exists (the rounds' own IBs are 48 bytes, so none does here).
+bool selfTest() {
+    unsigned on = 1;
+    PE_parse_boot_argn("cas-gpu-selftest", &on, sizeof on);
+    if (!on) {putRow(kRowSelfTest, "ST skip"); return true;}
+    uint32_t *p = native_gpu_publish;
+    stage(155);
+    IOService *svc = native_adreno_published_service();
+    if (!svc) {putRow(kRowSelfTest, "ST nosvc"); return false;}
+    p[8] = uint32_t(ucRound(svc, 1));
+    p[14] = p[4];
+    p[15] = p[3];
+    for (unsigned i = 0; i < 4; ++i) p[16 + i] = p[10 + i];
+    stage(156);
+    p[9] = uint32_t(ucRound(svc, 2));
+    gReplayResult = 0;
+    if (native_adreno_ib_log_count && int32_t(p[9]) >= 3) {
+        const volatile uint32_t *r = native_adreno_ib_log[(native_adreno_ib_log_count - 1) & 3];
+        const uint32_t bytes = r[3], words = bytes / 4;
+        if (bytes > 48 && words <= 192) {
+            stage(157);
+            for (unsigned i = 0; i < 96 && i < words; ++i) gReplayIb[i] = r[6 + i];
+            for (unsigned i = 96; i < 176 && i < words; ++i) gReplayIb[i] = r[216 + (i - 96)];
+            for (unsigned i = 176; i < words; ++i) gReplayIb[i] = r[200 + 16 - (words - i)];
+            gReplayWords = words;
+            gReplayResult = ucRound(svc, 3);
+            gReplayWords = 0;
+        }
+    }
+    // Signed: a failed round is -1, which as uint32_t would pass a ">= 3" test.
+    const bool ok = int32_t(p[8]) >= 3 && int32_t(p[9]) >= 3;
+    char line[48];
+    snprintf(line, sizeof line, "ST %s %d %d f%x@%u s%u/%u r1 %u/%u rp%d", ok ? "ok" : "bad", int32_t(p[8]), int32_t(p[9]), p[5],
+             p[6], p[3], p[4], p[15], p[14], gReplayResult);
+    putRow(kRowSelfTest, line);
+    return ok;
+}
+
+// alioth's heartbeat (:1687-1756), reduced to one 47-character row: every 2 s the GPU interrupts taken, the submissions and
+// their completed fences, timeouts, the driver's hangs and restarts (its hangcheck, every 500 ms), user clients opened and
+// closed, and the uptime in seconds, which shows the thread is alive. It never returns.
+[[noreturn]] void heartbeat() {
+    for (;;) {
+        const NativeAdrenoSubmitStats st = gSubmit->stats();
+        uint32_t closed = 0;
+        const uint32_t opened = native_adreno_publish_stats(&closed);
+        uint64_t ns = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+        char line[48];
+        snprintf(line, sizeof line, "LIVE i%u s%u/%u t%u h%u/%u u%u/%u %llus", gIrqCount, st.submissions, st.completed, st.timeouts,
+                 st.hangs, st.restarts, opened, closed, static_cast<unsigned long long>(ns / 1000000000ull));
+        putRow(kRowLive, line);
+        IOSleep(2000);
+    }
+}
+
 void gpuThread(void *, wait_result_t) {
     IOSleep(5000);
     native_gpu_step = 1;
@@ -996,15 +1317,27 @@ void gpuThread(void *, wait_result_t) {
     if (gMode >= 8 && gColdOk) gxOn();
     // alioth's gpuThread: mode 9 only with GX on, mode 10 only after the marker came back.
     const bool cp = gMode >= 9 && gColdOk && native_gpu_gx.gx_on && gpuContext() && cpStart();
-    if (gMode >= 10 && cp && leaveSecure()) gpuInterrupt();
+    const bool zap = gMode >= 10 && cp && leaveSecure();
+    const bool irq = zap && gpuInterrupt();
+    // Mode 11 (alioth's gpuThread :1823-1827) only after 9 and 10 succeeded: their detailed rows give way to one OK row.
+    if (gMode >= 11 && irq) {
+        char line[48];
+        snprintf(line, sizeof line, "OK cp%u zap%u irq%u m %x", unsigned(cp), unsigned(zap), unsigned(irq), native_gpu_cp[8]);
+        putRow(kRowOk, line);
+        if (publish()) {
+            selfTest();
+            stage(99);
+            heartbeat();   // the thread stays for the rest of the boot
+        }
+    }
     stage(99);
 }
 }  // namespace
 
 extern "C" void cas_gpu_probe(void) {
     unsigned mode = 0;
-    // Modes 11 and above (alioth's user clients and Metal) are not ported; mode 4 does not exist.
-    if (!PE_parse_boot_argn("cas-gpu", &mode, sizeof mode) || !mode || mode == 4 || mode > 10 || native_gpu_step) return;
+    // Mode 12 and above (alioth's Metal accelerator) are not ported; mode 4 does not exist.
+    if (!PE_parse_boot_argn("cas-gpu", &mode, sizeof mode) || !mode || mode == 4 || mode > 11 || native_gpu_step) return;
     gMode = mode;
     native_gpu_step = 1;
     thread_t thread = nullptr;

@@ -4,13 +4,15 @@
 After UniXNU-alioth@f188378 scripts/build-adreno650.py. build-xnu-4k-baseline.sh links CONFIG_XNU_NATIVE_ADRENO from
 build/adreno740/libAdreno740.a (the A740 name is hard-coded there), so the A650 archive is produced under that name.
 
-What it carries (cas-gpu=1..10):
+What it carries (cas-gpu=1..11):
   - the kits ArmSmmu4K, AdrenoPM4 (AdrenoPM4.c) and AdrenoFirmware (the HFI transport and startup), selected in board.toml so
     the tree has them at kits/<name>;
   - NativeAdreno's GMU SMMU context and memory, and for modes 9-10 its GPU SMMU context, ring 0, CP init and A6xx interrupt mask
     (NativeAdrenoGpuContext/Ring/CpInit/Irq, as UniXNU-alioth@f188378's archive has them), from FFT-infra/Adreno650 (the A650 fork
     alioth runs; 70771a7 carries alioth 059b678's ring fix: CP_RB_CNTL without NO_UPDATE, the RPTR read from the CP's shadow), pinned at DRIVER_COMMIT and
-    checked out into the tree's .cache (ADRENO650_DRIVER=<checkout> overrides; its HEAD must still be DRIVER_COMMIT). Adreno650
+    checked out into the tree's .cache (ADRENO650_DRIVER=<checkout> overrides; its HEAD must still be DRIVER_COMMIT); for mode 11
+    also NativeAdrenoSubmit/Timer/UserClient/Publish (publication, user clients and the hangcheck; the probe defines the two
+    weak_import symbols they need that alioth's board provides, native_gpu_dcvs and boot_log_export_put). Adreno650
     is not in UniXNU's catalogue and selecting Adreno740 would pull Sm8550Platform, so the recipe fetches it itself;
   - the board's A650 cold start (kits/cas/a650/A650Gmu.c) and probe (kits/cas/GpuProbe.cpp, cas_gpu_probe);
   - GpuFirmwareA650.c, generated here from this phone's own vendor firmware: a650_gmu.bin (mode 7), a650_sqe.fw (mode 9) and
@@ -44,7 +46,10 @@ FIRMWARE = {
 DRIVER_OBJECTS = ['NativeAdrenoGmuContext', 'NativeAdrenoGmuMemory', 'NativeAdrenoSmmuContext', 'NativeAdrenoSmmuMemory',
                   'NativeAdrenoMemory', 'NativeAdrenoVm', 'NativeAdrenoCpu',
                   # Modes 9-10: the GPU's SMMU context and kernel buffers, ring 0, CP_ME_INIT and the A6xx RBBM interrupt mask.
-                  'NativeAdrenoGpuContext', 'NativeAdrenoRing', 'NativeAdrenoCpInit', 'NativeAdrenoIrq']
+                  'NativeAdrenoGpuContext', 'NativeAdrenoRing', 'NativeAdrenoCpInit', 'NativeAdrenoIrq',
+                  # Mode 11: the submission object, the always-on timer, the user client and the publication (with its
+                  # hangcheck), as UniXNU-alioth@f188378's archive has them. NativeAdrenoAccelerator (mode 12) stays out.
+                  'NativeAdrenoSubmit', 'NativeAdrenoTimer', 'NativeAdrenoUserClient', 'NativeAdrenoPublish']
 
 
 def fail(why):
@@ -188,7 +193,9 @@ if missing:
 required = ('_cas_gpu_probe', '_native_gpu_short', '_NativeAdrenoGmuContextBringupRoutes', '_NativeAdrenoGmuContextPayloads',
             '_A650GmuColdStart', '_A650GmuBuildStartup', '_A650GmuPowerGx', '_native_gpu_gmu_firmware', '_native_gpu_gmu_firmware_size',
             '_NativeAdrenoGpuContextBringupRoutes', '_NativeAdrenoGpuContextBuffers', '_native_gpu_sqe_firmware',
-            '_native_gpu_sqe_firmware_size', '_native_gpu_zap_firmware', '_native_gpu_zap_firmware_size')
+            '_native_gpu_sqe_firmware_size', '_native_gpu_zap_firmware', '_native_gpu_zap_firmware_size',
+            '_NativeAdrenoGpuContextVm', '_native_adreno_publish', '_native_adreno_set_restart', '_native_adreno_close_step_set',
+            '_native_gpu_dcvs', '_boot_log_export_put')
 absent = [s for s in required if s not in defined]
 if absent:
     fail('required definitions absent: ' + ', '.join(absent))

@@ -53,8 +53,10 @@ windows = [
 [payload]
 volume = "CAS_IOS17"
 # The owner-root kernel carries the signed OS and SystemOS block hashes (~73 MB) and the payload files
-# take 120 MiB; the builder wants 5% headroom. uefi-cas CAS_PAYLOAD_SIZE allows up to 192 MiB.
-size_mib = 127
+# take 120.7 MiB since the GPU driver's mode 11 objects (gpu-005); the builder wants 5% headroom, which 127 MiB
+# missed by 70 KB. uefi-cas CAS_PAYLOAD_SIZE allows up to 192 MiB. The boot image (128.84 MiB) is now larger than
+# the 128 MiB boot partition: it is for fastboot boot only.
+size_mib = 128
 loader = "firmware"
 title = "cas iPadOS 17"
 timeout = 3
