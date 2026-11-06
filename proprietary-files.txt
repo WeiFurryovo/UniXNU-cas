@@ -6,7 +6,9 @@
 #
 # Adreno 650 (CONFIG_XNU_NATIVE_ADRENO, scripts/build-adreno650.py, cas-gpu=7+): from this phone's vendor partition
 # (/vendor/firmware), read from the directory local.toml [cas] a650_firmware names; embedded into the build tree's
-# build/adreno740/GpuFirmwareA650.c only, never committed. The script refuses any other content.
+# build/adreno740/GpuFirmwareA650.c only, never committed. The script refuses any other content. a650_gmu.bin is mode 7's,
+# a650_sqe.fw mode 9's, a650_zap.elf mode 10's (PAS 13): the full ELF carries the metadata and the segment at their program-header
+# offsets, so the vendor partition's split a650_zap.mdt and .b00-.b02 (same bytes) are not used.
 vendor/firmware/a650_gmu.bin sha256=df79fa8482fcc7587bb239b9c9e2b24bce4729893b990fe3f82b30da8175b01c
 vendor/firmware/a650_sqe.fw sha256=b4c27420fd6a5c6b511b254cc0fad8cdd40eea38ceb3418f895a1084f4460487
 vendor/firmware/a650_zap.elf sha256=a3b05d17dcb0b4a7c9320df5a087a1f54717dc1774eba2ea9cd766464e71167e

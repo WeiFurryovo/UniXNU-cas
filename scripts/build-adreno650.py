@@ -4,14 +4,18 @@
 After UniXNU-alioth@f188378 scripts/build-adreno650.py. build-xnu-4k-baseline.sh links CONFIG_XNU_NATIVE_ADRENO from
 build/adreno740/libAdreno740.a (the A740 name is hard-coded there), so the A650 archive is produced under that name.
 
-What it carries (enough for cas-gpu=1..8; the objects modes 9-10 add are listed in LATER, not built yet):
+What it carries (cas-gpu=1..10):
   - the kits ArmSmmu4K, AdrenoPM4 (AdrenoPM4.c) and AdrenoFirmware (the HFI transport and startup), selected in board.toml so
     the tree has them at kits/<name>;
-  - NativeAdreno's GMU SMMU context and memory from FFT-infra/Adreno650 (the A650 fork alioth runs), pinned at DRIVER_COMMIT and
+  - NativeAdreno's GMU SMMU context and memory, and for modes 9-10 its GPU SMMU context, ring 0, CP init and A6xx interrupt mask
+    (NativeAdrenoGpuContext/Ring/CpInit/Irq, as UniXNU-alioth@f188378's archive has them), from FFT-infra/Adreno650 (the A650 fork
+    alioth runs; 70771a7 carries alioth 059b678's ring fix: CP_RB_CNTL without NO_UPDATE, the RPTR read from the CP's shadow), pinned at DRIVER_COMMIT and
     checked out into the tree's .cache (ADRENO650_DRIVER=<checkout> overrides; its HEAD must still be DRIVER_COMMIT). Adreno650
     is not in UniXNU's catalogue and selecting Adreno740 would pull Sm8550Platform, so the recipe fetches it itself;
   - the board's A650 cold start (kits/cas/a650/A650Gmu.c) and probe (kits/cas/GpuProbe.cpp, cas_gpu_probe);
-  - GpuFirmwareA650.c, generated here from this phone's own vendor firmware. The firmware never enters a repository: its directory
+  - GpuFirmwareA650.c, generated here from this phone's own vendor firmware: a650_gmu.bin (mode 7), a650_sqe.fw (mode 9) and
+    a650_zap.elf (mode 10; the full ELF, whose segments sit at their program-header offsets, so the split a650_zap.mdt/.b00-.b02
+    are not needed: the probe takes the metadata and the segment straight from it). The firmware never enters a repository: its directory
     comes from CAS_A650_FIRMWARE or the ignored local.toml of the device repository ([cas] a650_firmware = "<dir>"), every file is
     checked against the SHA-256 recorded in proprietary-files.txt (and below), and the C file is written only into build/.
 """
@@ -38,9 +42,9 @@ FIRMWARE = {
     'zap': ('a650_zap.elf', 'a3b05d17dcb0b4a7c9320df5a087a1f54717dc1774eba2ea9cd766464e71167e'),
 }
 DRIVER_OBJECTS = ['NativeAdrenoGmuContext', 'NativeAdrenoGmuMemory', 'NativeAdrenoSmmuContext', 'NativeAdrenoSmmuMemory',
-                  'NativeAdrenoMemory', 'NativeAdrenoVm', 'NativeAdrenoCpu']
-# Modes 9-10 (the GPU context, ring, CP init and interrupt) will add these, as alioth's archive has them.
-LATER = ['NativeAdrenoGpuContext', 'NativeAdrenoRing', 'NativeAdrenoCpInit', 'NativeAdrenoIrq']
+                  'NativeAdrenoMemory', 'NativeAdrenoVm', 'NativeAdrenoCpu',
+                  # Modes 9-10: the GPU's SMMU context and kernel buffers, ring 0, CP_ME_INIT and the A6xx RBBM interrupt mask.
+                  'NativeAdrenoGpuContext', 'NativeAdrenoRing', 'NativeAdrenoCpInit', 'NativeAdrenoIrq']
 
 
 def fail(why):
@@ -182,7 +186,9 @@ missing = sorted(s for s in undefined - defined
 if missing:
     fail('symbols used but not built here: ' + ', '.join(missing))
 required = ('_cas_gpu_probe', '_native_gpu_short', '_NativeAdrenoGmuContextBringupRoutes', '_NativeAdrenoGmuContextPayloads',
-            '_A650GmuColdStart', '_A650GmuBuildStartup', '_A650GmuPowerGx', '_native_gpu_gmu_firmware', '_native_gpu_gmu_firmware_size')
+            '_A650GmuColdStart', '_A650GmuBuildStartup', '_A650GmuPowerGx', '_native_gpu_gmu_firmware', '_native_gpu_gmu_firmware_size',
+            '_NativeAdrenoGpuContextBringupRoutes', '_NativeAdrenoGpuContextBuffers', '_native_gpu_sqe_firmware',
+            '_native_gpu_sqe_firmware_size', '_native_gpu_zap_firmware', '_native_gpu_zap_firmware_size')
 absent = [s for s in required if s not in defined]
 if absent:
     fail('required definitions absent: ' + ', '.join(absent))
