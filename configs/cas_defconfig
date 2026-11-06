@@ -32,9 +32,9 @@ CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
 CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/virtio-mmio-block-verified-bundle/libVirtioMmioBlock.a"
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
 CONFIG_XNU_OWNER_DATA_MOUNT=y
-# Volume UUID of the 32 MiB Data seed from .github/workflows/data-seed.yml run 41193517269
-# (cas-data-32m.dbr 07b588b2...); every seed build makes a new one.
-CONFIG_XNU_OWNER_DATA_VOLUME_UUID="1EDA187B-D502-4E9F-9A59-481F5BFC6D81"
+# Volume UUID of the Data seed (3 GiB container) from .github/workflows/data-seed.yml run 41294881443
+# (cas-data-3g.dbr f4c8f3c4..., grown by seed-data-grow.py); every seed build makes a new one.
+CONFIG_XNU_OWNER_DATA_VOLUME_UUID="28D3F7FE-7309-438E-B4A6-C02EAE41DE09"
 # boot_progress_poll for NativeUfs when CONFIG_XNU_BOOT_PROGRESS is off (scripts/build-link-stubs.py); with it
 # on, the force-loaded libBootProgress.a defines the name and the stub member is never pulled.
 CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"

@@ -46,6 +46,7 @@ OBJCOPY = shutil.which('llvm-objcopy')
 AR = shutil.which('llvm-ar') or 'ar'
 require(OBJCOPY, 'llvm-objcopy not found')
 PROBE_SOURCE = ROOT / 'kits/cas/LegacyDisplayProbe.cpp'
+KEYSTORE_SOURCE = ROOT / 'kits/cas/KeyStoreProbe.cpp'
 
 # 1. The reference candidate: the board's previous kernel, under the name the audit and the bindings read.
 reference = ROOT.parent / 'kernel/kernel.macho'
@@ -283,6 +284,17 @@ command += ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Werror', '-Wno-unused-p
 run(command, cwd=record['directory'])
 (OUT / 'probe-compile-command.json').write_text(json.dumps(command, indent=2) + '\n')
 
+# The AppleKeyStore stand-in, as alioth builds it: the probe (same recipe as the display probe) supplies the board
+# callbacks and registers the component's class, whose initialiser is staged like the display's. A static archive is
+# only pulled in when something references it, so the component's own library is not enough.
+keystore_probe_obj = OUT / 'KeyStoreProbe.o'
+run([str(KEYSTORE_SOURCE) if x == str(PROBE_SOURCE) else str(keystore_probe_obj) if x == str(probe_obj) else x
+     for x in command], cwd=record['directory'])
+keystore = ROOT / 'build/apple-key-store-state/NativeKeyStoreEvents.o'
+require(keystore.is_file(), 'no NativeKeyStoreEvents.o; component:AppleKeyStoreState must run before this script')
+keystore_late = OUT / 'NativeKeyStoreEvents.late.o'
+stage_late(keystore, keystore_late, '__GLOBAL__sub_I_NativeKeyStoreEvents.cpp')
+
 # 5. The owned presenter, staged the same way.
 print(run(['python3', ROOT / 'scripts/cas-arm-driver.py', 'NativeGOPPresenter'], text=True), end='')
 presenter = ROOT / 'build/native-gop-presenter/NativeGOPPresenter.o'
@@ -292,16 +304,17 @@ stage_late(presenter, presenter_late, '__GLOBAL__sub_I_NativeGOPPresenter.cpp')
 
 archive = OUT / 'libNativeLegacyDisplay.late.a'
 archive.unlink(missing_ok=True)
-run([AR, 'rcs', archive, late, OUT / 'original-bindings.o', probe_obj, presenter_late])
+run([AR, 'rcs', archive, late, OUT / 'original-bindings.o', probe_obj, presenter_late, keystore_probe_obj, keystore_late])
 # build-xnu-4k-baseline.sh rehashes these sources (relative to the tree) before linking the archive.
 sources = [ROOT / 'drivers/GopFramebuffer/NativeLegacyDisplay.cpp', ROOT / 'drivers/GopFramebuffer/NativeLegacyRequest.h',
            ROOT / 'drivers/GopFramebuffer/NativeGOPPresenter.cpp', ROOT / 'drivers/GopFramebuffer/NativeGOPWire.h',
-           PROBE_SOURCE, OUT / 'OriginalLegacyFramebufferABI.h']
+           PROBE_SOURCE, KEYSTORE_SOURCE, ROOT / 'drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp',
+           OUT / 'OriginalLegacyFramebufferABI.h']
 (OUT / 'build-report.json').write_text(json.dumps(dict(
     source_sha256={str(path.relative_to(ROOT)): sha(path) for path in sources},
     original_candidate_sha256=sha(candidate), original_audit_sha256=sha(analysis),
     compiled_object_sha256=sha(obj), late_object_sha256=sha(late), probe_object_sha256=sha(probe_obj),
-    presenter_object_sha256=sha(presenter_late), archive_sha256=sha(archive),
+    presenter_object_sha256=sha(presenter_late), keystore_object_sha256=sha(keystore_late), archive_sha256=sha(archive),
     bindings={name: hex(value) for name, value in bindings.items()},
     virtual_entries=358, owned_entries=owned, inherited_native_entries=native,
     original_instructions_modified=False, runtime_qualified=False), indent=2) + '\n')
