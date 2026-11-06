@@ -514,6 +514,9 @@ void native_legacy_display_late_probe(void) {
     // through the SPMI arbiter and hands each change to the HID device's report 2 (touch/NativeHidInput.cpp).
     extern void cas_buttons_probe(void);
     cas_buttons_probe();
+    // Adreno 650, stage S1 (cas-gpu=1, GpuProbe.cpp): a read-only look at the GPU's clocks, rails, SMMU and speed bin.
+    extern void cas_gpu_probe(void);
+    cas_gpu_probe();
     // Then touch, as on umi: the ST FTM5 worker (touch/UmiFtsTouch.cpp, cas-fts=1) and the HID publisher that turns
     // its contacts into digitizer reports (touch/HidInputProbe.cpp, offline-hid-input=1). Both are no-ops without
     // their boot arguments.
