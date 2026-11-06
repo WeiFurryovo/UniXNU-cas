@@ -6,13 +6,16 @@
 // Native fts_init -> fts_crc_check -> post-version-check reset. All three
 // GPIO resets must produce READY before sensing. Reject unsupported identity,
 // CRC or AFE state instead of attempting native firmware/calibration writes.
+extern "C" volatile uint32_t umi_fts_seen_chip,umi_fts_seen_fw,umi_fts_seen_svn,umi_fts_seen_config;
 static inline unsigned umi_fts_native_identity_check(const UmiFtsControllerRead &r,
                                              const UmiFtsSysInfo &s) {
     if(r.sysResult || r.bytesRead!=UMI_FTS_SYSINFO_SIZE || r.chunkMask!=0x1fff)return 1;
     if(!s.valid)return 2;
     if(r.crcResult)return 3;
     if(r.crc&3)return 4;
-    if(s.chip0!=0x3639 || s.fw!=0x128 || s.svn!=0x4053 || s.config!=0x4b)return 5;
+    // cas: umi pinned chip 0x3639 fw 0x128 svn 0x4053 config 0x4b (st_fts_j2_2.ftb). cas carries st_fts_j1s.ftb, so
+    // its values are recorded for the panel (umi_fts_seen_*) and accepted: nothing here writes firmware or NVM.
+    umi_fts_seen_chip=s.chip0;umi_fts_seen_fw=s.fw;umi_fts_seen_svn=s.svn;umi_fts_seen_config=s.config;
     if(s.cfgAfe!=s.cxAfe || s.cfgAfe!=s.panelAfe)return 6;
     return 0;
 }

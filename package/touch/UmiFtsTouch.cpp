@@ -30,6 +30,9 @@ volatile uint32_t native_touch_seq,native_touch_count,native_touch_hid_reports,n
 volatile int native_touch_xs[12],native_touch_ys[12],native_touch_ids[12];
 volatile unsigned native_touch_stage_req;
 char native_touch_rows[4][120];
+// cas: what the controller reported (UmiFtsStartup.h, UmiFtsIdentity.h) and the board-boost outcome, for the panel.
+volatile uint32_t umi_fts_seen_chip,umi_fts_seen_fw,umi_fts_seen_svn,umi_fts_seen_config,cas_fts_boost_flags;
+uint8_t cas_fts_identity[8];volatile uint32_t cas_fts_identity_flags;
 extern char boot_progress_ext[8][48];
 extern volatile uint32_t native_hid_stage,native_hid_resource_found,native_hid_input_events[8],native_touch_edge_stats[4];
 extern volatile int native_hid_load_status,native_hid_matching_load_status,native_hid_input_results[8];
@@ -342,15 +345,21 @@ extern "C" void umi_touch_snapshot(uint64_t v[32]) {
     v[21]=native_touch_hid_reports;v[22]=native_touch_loop_step;v[23]=producer-consumer;
     for(unsigned i=0;i<4;++i)v[24+i]=native_touch_edge_stats[i];
     v[28]=state.sequence;v[29]=logPublished;v[30]=seconds();v[31]=native_hid_input_events[7];
+    snprintf(boot_progress_ext[2],48,"FW chip=%04x fw=%04x svn=%04x cfg=%04x",umi_fts_seen_chip,umi_fts_seen_fw,umi_fts_seen_svn,umi_fts_seen_config);
+    snprintf(boot_progress_ext[3],48,"ID %02x%02x%02x%02x%02x%02x%02x%02x f=%x bst=%x",cas_fts_identity[0],cas_fts_identity[1],
+        cas_fts_identity[2],cas_fts_identity[3],cas_fts_identity[4],cas_fts_identity[5],cas_fts_identity[6],cas_fts_identity[7],
+        cas_fts_identity_flags,cas_fts_boost_flags);
     snprintf(boot_progress_ext[4],48,"FTS stage=%u err=%u raw=%u pt=%u",stage,failure,rawCount,pointCount);
     snprintf(boot_progress_ext[5],48,"TOUCH n=%u q=%u drop=%u ack=%x",native_touch_count,producer-consumer,queueDrops,lastAck);
     snprintf(boot_progress_ext[6],48,"HID st=%u start=%u rpt=%u rc=%x",native_hid_stage,native_hid_input_events[2],native_touch_hid_reports,(unsigned)native_hid_input_results[6]);
     snprintf(boot_progress_ext[7],48,"EDGE on=%u start=%u edge=%u",native_touch_edge_stats[0],native_touch_edge_stats[1],native_touch_edge_stats[2]);
     snprintf(native_touch_rows[0],120,"FTS stage=%u failure=%u raw=%u points=%u I2C errors=%u last=%02x/%02x",stage,failure,rawCount,pointCount,transportErrors,lastRaw[0],lastRaw[1]);
 }
+// cas: the board's ADT names it in the root's hardware-model (UniXNU-cas board.toml [adt.root.string]); the os profile
+// owns /product. Same ST FTM5, I2C 0x49 on SE13, GPIO 36-39/69 and PM8150A L1 as umi (cas live FDT).
 static bool isUmi(void) {
-    IORegistryEntry *root=IORegistryEntry::fromPath("/product",gIODTPlane);if(!root)return false;
-    OSData *model=OSDynamicCast(OSData,root->getProperty("model"));const char expected[]="Qualcomm Technologies, Inc. xiaomi umi";
+    IORegistryEntry *root=IORegistryEntry::fromPath("/",gIODTPlane);if(!root)return false;
+    OSData *model=OSDynamicCast(OSData,root->getProperty("hardware-model"));const char expected[]="Qualcomm Technologies, Inc. xiaomi cas";
     bool match=model && model->getLength()==sizeof(expected) && !memcmp(model->getBytesNoCopy(),expected,sizeof(expected));root->release();return match;
 }
 static int transfer(const uint8_t *w,unsigned wn,uint8_t *r,unsigned rn) {
@@ -475,10 +484,11 @@ static bool enableBoardBoost(void) {
         v[14]=r.delayUs;v[15]=0;
         __atomic_store_n(&logPublished,i+1,__ATOMIC_RELEASE);
     }
+    cas_fts_boost_flags=r.flags|(r.result<<16);
     return r.result==0;
 }
 static void worker(void *,wait_result_t) {
-    thread_set_thread_name(current_thread(),"umi_fts");stage=2;
+    thread_set_thread_name(current_thread(),"cas_fts");stage=2;
     if(!isUmi()){failure=1;stage=90;return;}
     for(auto &r:regions){IODeviceMemory *mem=IODeviceMemory::withRange(r.physical,r.length);
         if(mem){r.mapping=mem->map(kIOMapAnywhere|kIOMapInhibitCache);mem->release();}
@@ -491,7 +501,7 @@ static void worker(void *,wait_result_t) {
     // Retain on touch failure too; never change its inherited VIN or drive mode.
     if(!enableBoardBoost()){stop(24);return;}
     unsigned native=0;
-    bus::mNative=PE_parse_boot_argn("umi-fts-gpi",&native,sizeof(native)) && native==1;
+    bus::mNative=PE_parse_boot_argn("cas-fts-gpi",&native,sizeof(native)) && native==1;
     stage=3;
     if(bus::mNative){bool ok=gpi::initialize();gpi::capture();recordGpiClock();recordGpiSmmu();recordGpi(0);if(!ok){stop(19);return;}}
     bus::Snapshot();int rc=bus::AcquirePins();lastResult=rc;recordPowerCycle();touchFlush();
@@ -581,6 +591,7 @@ static void worker(void *,wait_result_t) {
                             [](unsigned ms){IOSleep(ms);},
                             [](){return GetTimeInNanoSecond(GetPerformanceCounter());});
                         recordIdentity(identity,GetTimeInNanoSecond(GetPerformanceCounter()-started));
+                        memcpy(cas_fts_identity,identity.identity,8);cas_fts_identity_flags=identity.flags|(identity.result<<16);
                         if(identity.result){stop(23);return;}
                     }
                     // READY #1 -> CRC-check reset; READY #2 -> post-version
@@ -653,7 +664,7 @@ static void worker(void *,wait_result_t) {
     }
 }
 extern "C" void native_touch_probe(void) {
-    unsigned enabled=0;if(!PE_parse_boot_argn("umi-fts",&enabled,sizeof(enabled)) || enabled!=1 || stage)return;
+    unsigned enabled=0;if(!PE_parse_boot_argn("cas-fts",&enabled,sizeof(enabled)) || enabled!=1 || stage)return;
     __asm__ volatile("mrs %0,cntfrq_el0":"=r"(frequency));if(!frequency)return;epoch=GetPerformanceCounter();
     native_touch_stage_req=1;stage=1;thread_t t;
     if(kernel_thread_start(worker,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);else{stage=90;failure=12;}

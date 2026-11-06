@@ -2,7 +2,7 @@
 // Bounded offline original lifecycle instrument; no desktop claim.
 // cas: UniXNU-sheng@08cde20 package/LegacyDisplayProbe.cpp, the board half matching GopFramebuffer 33e941a. The late
 // entry starts the display only (sheng's touch, Wi-Fi, audio, battery, buttons, backlight, DPU, CPU frequency, GPU
-// power and HID probes are not built here; the key store probe runs first, as on sheng), and the display milestones are written to the boot-progress
+// power probes are not built here; the key store, touch and HID probes run first, as on umi), and the display milestones are written to the boot-progress
 // panel, which stays on screen until the first frame is copied.
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IODeviceMemory.h>
@@ -506,6 +506,13 @@ void native_legacy_display_late_probe(void) {
     // a static link would drop it. Opt-in through offline-key-events=1; sheng-aks=1 answers "no passcode, unlocked".
     extern void native_keystore_probe(void);
     native_keystore_probe();
+    // Then touch, as on umi: the ST FTM5 worker (touch/UmiFtsTouch.cpp, cas-fts=1) and the HID publisher that turns
+    // its contacts into digitizer reports (touch/HidInputProbe.cpp, offline-hid-input=1). Both are no-ops without
+    // their boot arguments.
+    extern void native_touch_probe(void);
+    extern void native_hid_input_probe(void);
+    native_touch_probe();
+    native_hid_input_probe();
     displayLateProbe();
     displayStage("DISPLAY late probe stage=%u surface=%d/%u dt=%u start=%u",native_legacy_stage,native_legacy_surface_status,
       native_legacy_surface_found,native_legacy_dt_attached,native_legacy_start_result);

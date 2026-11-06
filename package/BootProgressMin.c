@@ -740,11 +740,14 @@ boot_progress_exit(int pid, const char *name, int rv, unsigned namespace_id, uin
  * one CPU no refresh can be in flight on another core, and the probe calls this from thread context, so a refresh
  * on this CPU has finished before the call; returning 1 at once is the whole hand-over. It is never undone: the
  * frame the display copies next must not be overwritten. */
+static void bp_banner_start(void);
+
 int
 boot_progress_prepare_scanout(void)
 {
 	g_screen.handed_over = 1;
 	__asm__ volatile ("dmb ish" ::: "memory");
+	bp_banner_start();
 	return 1;
 }
 
@@ -766,5 +769,78 @@ boot_progress_pulse_anchor(uintptr_t base, uint64_t bytes, unsigned width, unsig
 	return 0;
 }
 
-/* Extra panel rows sheng's key-store probe writes (KeyStoreProbe.cpp); kept so it links, not drawn. */
+/* Extra panel rows: 0-1 the key store (KeyStoreProbe.cpp), 2-7 the touch driver (touch/UmiFtsTouch.cpp). Drawn only by
+ * the banner below. */
 char boot_progress_ext[8][48];
+
+/* cas-banner=1: once the display owns the scan-out buffer the panel above is gone, so a thread repaints the non-empty
+ * extension rows over the bottom of the frame every 500 ms. The next copied frame overwrites them; this is a bring-up
+ * view for a photograph, not a UI. The rows are written straight to the scan-out buffer and cleaned to memory, which
+ * the command-mode panel's autorefresh reads. */
+extern int PE_parse_boot_argn(const char *name, void *value, int size);
+extern int kernel_thread_start(void (*entry)(void *, int), void *argument, void **thread);
+extern void thread_deallocate(void *thread);
+extern void IOSleep(unsigned milliseconds);
+extern void umi_touch_snapshot(uint64_t values[32]) __attribute__((weak_import));
+
+static void
+bp_banner_clean(unsigned row)
+{
+	uintptr_t start = (uintptr_t) g_screen.fb + (uintptr_t) row * 14u * g_screen.scale * g_screen.stride;
+	uintptr_t end = start + (uintptr_t) 14u * g_screen.scale * g_screen.stride;
+
+	for (start &= ~(uintptr_t) 63; start < end; start += 64) {
+		__asm__ volatile ("dc cvac, %0" :: "r" (start) : "memory");
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+static void
+bp_banner_thread(void *argument, int result)
+{
+	(void) argument;
+	(void) result;
+	for (;;) {
+		unsigned slot, column, row = g_screen.rows - 9u;
+
+		if (&umi_touch_snapshot) {
+			uint64_t values[32];
+
+			umi_touch_snapshot(values);     /* refreshes rows 2-7 */
+		}
+		for (slot = 0; slot < 8; slot++, row++) {
+			const char *text = boot_progress_ext[slot];
+
+			if (text[0] == 0) {
+				continue;
+			}
+			for (column = 0; column < g_screen.cols && column < 48; column++) {
+				char character = column < 47 ? text[column] : 0;
+
+				bp_cell(row, column, character >= 32 ? character : ' ', BP_WHITE, BP_INK);
+				if (character == 0) {
+					break;
+				}
+			}
+			bp_banner_clean(row);
+		}
+		IOSleep(500);
+	}
+}
+
+static void
+bp_banner_start(void)
+{
+	static unsigned started;
+	unsigned enabled = 0;
+	void *thread = NULL;
+
+	if (started || !g_screen.bound || g_screen.rows < 10 ||
+	    !PE_parse_boot_argn("cas-banner", &enabled, sizeof(enabled)) || enabled != 1) {
+		return;
+	}
+	started = 1;
+	if (kernel_thread_start(bp_banner_thread, NULL, &thread) == 0) {
+		thread_deallocate(thread);
+	}
+}

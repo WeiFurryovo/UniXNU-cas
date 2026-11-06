@@ -36,7 +36,11 @@ static UmiFtsIdentity umi_fts_read_identity(Transfer transfer,Sleep sleep,Now no
     for(unsigned n=0;n<8;++n){r.after[n]=header[n];r.identity[n]=header[n+20];}r.flags|=8;
     unsigned after=unsigned(header[2])|(unsigned(header[3])<<8);
     if(header[0]!=0xa5 || header[1]!=0x70 || header[4]!=0 || after!=((before+1)&65535U)){r.result=8;return r;}r.flags|=16;
+    // cas: umi's record is 53 42 32 01 74 02 32 01; cas reports its own (vendor 0x42 per its FDT). Flag 32 still
+    // means "umi's record", and the bytes go to the panel; a different record is not a failure.
     const uint8_t expected[]={0x53,0x42,0x32,1,0x74,2,0x32,1};
-    for(unsigned n=0;n<8;++n)if(r.identity[n]!=expected[n]){r.result=9;return r;}
-    r.flags|=32;return r;
+    bool same=true;
+    for(unsigned n=0;n<8;++n)if(r.identity[n]!=expected[n])same=false;
+    if(same)r.flags|=32;
+    return r;
 }

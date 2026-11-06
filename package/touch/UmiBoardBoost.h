@@ -21,7 +21,8 @@ static UmiBoardBoost umi_board_boost_enable(Read read,WriteHigh writeHigh,Delay 
     r.before=value[8];
     for(unsigned i=0;i<11;++i){
         if(i==8 ? (value[i]!=0 && value[i]!=0x80) : value[i]!=expected[i]){
-            r.result=i<4?2:3;return r;
+            // cas: the pin also drives the haptics boost there; a state umi never qualified is not touched.
+            r.flags|=0x40|(i<<8);r.after=value[8];r.writeResult=0;return r;
         }
     }
     r.flags|=1;

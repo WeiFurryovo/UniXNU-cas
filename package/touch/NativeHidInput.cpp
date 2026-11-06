@@ -204,7 +204,7 @@ public:
     void setTouchOnly() {touchOnly=true;}
     IOWorkLoop *getWorkLoop() const override {return inputLoop;}
     OSString *newTransportString() const override {return OSString::withCString(touchOnly?"I2C":"I2C");}
-    OSString *newProductString() const override {return OSString::withCString(touchOnly?"Mi 10 ST FTS touchscreen":"Mi 10 ST FTS HID");}
+    OSString *newProductString() const override {return OSString::withCString(touchOnly?"Mi 10 Ultra ST FTS touchscreen":"Mi 10 Ultra ST FTS HID");}
     IOReturn newReportDescriptor(IOMemoryDescriptor **out) const override {
         if(!out)return kIOReturnBadArgument;
         unsigned char combined[sizeof(descriptor)+sizeof(touchDescriptor)];

@@ -8,7 +8,7 @@ bsd_init and bsd_autoconf hooks of offline-component-load-probes.patch and offli
 
 This follows UniXNU-sheng@08cde20 scripts/build-gop-legacy-display.py, whose generated class header and bindings match
 the framework's GopFramebuffer 33e941a, with the board coupling removed the way UniXNU-alioth@520581a removes it: only
-the display path is built. Every class layout check, the 358-entry vtable check and every absolute address check is
+the display path is built, plus the AppleKeyStore stand-in and the touch objects of build-cas-touch.py. Every class layout check, the 358-entry vtable check and every absolute address check is
 kept and runs against this board's previous kernel (ROOT.parent/kernel), which carries the original family unchanged.
 
 Host differences: the drivers compile through scripts/cas-arm-driver.py (clang 24 warning), llvm-objcopy and llvm-ar come from PATH (no Homebrew), and the audit's pruned QEMU observation of the
@@ -304,17 +304,24 @@ stage_late(presenter, presenter_late, '__GLOBAL__sub_I_NativeGOPPresenter.cpp')
 
 archive = OUT / 'libNativeLegacyDisplay.late.a'
 archive.unlink(missing_ok=True)
-run([AR, 'rcs', archive, late, OUT / 'original-bindings.o', probe_obj, presenter_late, keystore_probe_obj, keystore_late])
+# The touch objects (scripts/build-cas-touch.py, which runs before this script): nothing references them but the probe,
+# so they ride in this force-loaded archive, as alioth's touch does.
+touch = ROOT / 'build/cas-touch'
+touch_objects = [touch / name for name in ('NativeHidInput.late.o', 'hid-original-bindings.o', 'UmiFtsTouch.o', 'HidInputProbe.o')]
+require(all(o.is_file() for o in touch_objects), 'no touch objects; build-cas-touch.py must run before this script')
+run([AR, 'rcs', archive, late, OUT / 'original-bindings.o', probe_obj, presenter_late, keystore_probe_obj, keystore_late,
+     *touch_objects])
 # build-xnu-4k-baseline.sh rehashes these sources (relative to the tree) before linking the archive.
 sources = [ROOT / 'drivers/GopFramebuffer/NativeLegacyDisplay.cpp', ROOT / 'drivers/GopFramebuffer/NativeLegacyRequest.h',
            ROOT / 'drivers/GopFramebuffer/NativeGOPPresenter.cpp', ROOT / 'drivers/GopFramebuffer/NativeGOPWire.h',
-           PROBE_SOURCE, KEYSTORE_SOURCE, ROOT / 'drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp',
+           PROBE_SOURCE, KEYSTORE_SOURCE, *sorted((ROOT / 'kits/cas/touch').glob('*.[ch]*')), ROOT / 'drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp',
            OUT / 'OriginalLegacyFramebufferABI.h']
 (OUT / 'build-report.json').write_text(json.dumps(dict(
     source_sha256={str(path.relative_to(ROOT)): sha(path) for path in sources},
     original_candidate_sha256=sha(candidate), original_audit_sha256=sha(analysis),
     compiled_object_sha256=sha(obj), late_object_sha256=sha(late), probe_object_sha256=sha(probe_obj),
-    presenter_object_sha256=sha(presenter_late), keystore_object_sha256=sha(keystore_late), archive_sha256=sha(archive),
+    presenter_object_sha256=sha(presenter_late), keystore_object_sha256=sha(keystore_late),
+    touch_object_sha256={o.name: sha(o) for o in touch_objects}, archive_sha256=sha(archive),
     bindings={name: hex(value) for name, value in bindings.items()},
     virtual_entries=358, owned_entries=owned, inherited_native_entries=native,
     original_instructions_modified=False, runtime_qualified=False), indent=2) + '\n')

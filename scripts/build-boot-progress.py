@@ -83,11 +83,12 @@ while index < len(args):
 policy_command += ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Werror']
 subprocess.run(policy_command, cwd=policy_record['directory'], check=True, timeout=120)
 
-# The archive is force-loaded, so everything the object imports must already be in the kernel.
+# The archive is force-loaded, so everything the object imports must already be in the kernel. Weak imports (the
+# touch driver's umi_touch_snapshot, linked from the display archive when touch is built) may be absent.
 KERNEL = ROOT.parent / 'kernel/kernel.macho'
 undefined = sorted({line.split()[-1] for o in (obj, policy_obj)
-                    for line in subprocess.run([NM, '-u', str(o)], capture_output=True, text=True,
-                                               check=True).stdout.splitlines() if line.strip()})
+                    for line in subprocess.run([NM, '-m', '-u', str(o)], capture_output=True, text=True,
+                                               check=True).stdout.splitlines() if line.strip() and ' weak ' not in line})
 provided = {'memset', 'memcpy', 'memmove', '___stack_chk_fail', '___stack_chk_guard', '_physmap_base'}
 if KERNEL.is_file():
     provided |= {line.split()[-1] for line in subprocess.run([NM, '--defined-only', str(KERNEL)], capture_output=True,
