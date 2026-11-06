@@ -36,6 +36,19 @@ bool native_aks_state_enabled(void) {
     }
     return cached == 1;
 }
+// The identity the component's software key wrapping derives its device key from (AppleKeyStoreState 634caf7): the
+// ADT's /chosen/unique-chip-id, which the payload carries from unixnu.local.toml. 0 (no identity) makes wrapping fail.
+size_t native_aks_device_id(uint8_t *out, size_t capacity) {
+    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+    OSData *id = chosen ? OSDynamicCast(OSData, chosen->getProperty("unique-chip-id")) : nullptr;
+    size_t n = 0;
+    if (id && out && id->getLength() == 8 && capacity >= 8) {
+        memcpy(out, id->getBytesNoCopy(), 8);
+        n = 8;
+    }
+    if (chosen) chosen->release();
+    return n;
+}
 // sheng-aks-sls=<n> overrides the reported lock state (default 0 = unlocked; 3 = MobileKeyBag's "no passcode").
 uint32_t native_aks_lock_state(void) {
     static int cached = -1;

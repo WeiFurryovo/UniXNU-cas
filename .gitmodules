@@ -1,0 +1,6 @@
+[submodule "drivers/ArmCpu"]
+	path = drivers/ArmCpu
+	url = https://github.com/UniXNU/ArmCpu.git
+[submodule "drivers/GopFramebuffer"]
+	path = drivers/GopFramebuffer
+	url = https://github.com/UniXNU/GopFramebuffer.git

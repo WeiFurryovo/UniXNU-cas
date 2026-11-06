@@ -13,11 +13,15 @@ kind = "driver"
 git = "https://github.com/FFT-infra/NativeUfs-alioth"
 commit = "ab5405905a1892da03a9a53e0fa3dcd255d04055"
 
+# ArmCpu and GopFramebuffer are also device submodules (drivers/), which take precedence over the framework's
+# own: UniXNU e2fdae4 records an ArmCpu commit (2e11cda) that was never pushed, so cas carries 93a5030, the
+# revision components.toml names; GopFramebuffer stays at 33e941a, the display ABI build-gop-legacy-display.py
+# qualifies (e47c1b8 changes the class layout and native_legacy_gpu_offer for the GPU scanout cas lacks).
 [[source]]
 name = "ArmCpu"
 kind = "driver"
 git = "https://github.com/UniXNU/ArmCpu.git"
-commit = "9066b53bbc82e92a98ec44a11dd50fd13eaf1a1b"
+commit = "93a5030c5d983d0ef90f0fca93879d6e36ad1ba8"
 
 [[source]]
 name = "ArmDTPlatform"
