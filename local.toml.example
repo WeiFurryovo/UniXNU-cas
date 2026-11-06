@@ -3,3 +3,9 @@
 # name = "sm8250"
 # kind = "soc"
 # local = "../UniXNU-sm8250-common"
+
+# Required with CONFIG_XNU_NATIVE_ADRENO=y: the directory holding the vendor partition's a650_gmu.bin, a650_sqe.fw and
+# a650_zap.elf (SHA-256 in proprietary-files.txt). scripts/build-adreno650.py reads it (or CAS_A650_FIRMWARE) and writes the
+# C arrays into the build tree only.
+# [cas]
+# a650_firmware = "~/private/cas/vendor/firmware"

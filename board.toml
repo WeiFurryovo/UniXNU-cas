@@ -10,7 +10,9 @@ os_profile = "ipados-17.7.11-21H461"
 description = "Xiaomi 10 Ultra (cas): iPadOS 17.7.11 on UniXNU"
 
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "VirtioMmioBlock", "RamBlock", "XnuPrelink", "DarwinBoot", "GopFramebuffer", "AppleKeyStoreState"]
+# ArmSmmu4K, AdrenoPM4 and AdrenoFirmware are embedded kits (no build of their own): selecting them puts their sources at
+# kits/<name>, where scripts/build-adreno650.py compiles them into the GPU archive, as UniXNU-alioth does.
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "VirtioMmioBlock", "RamBlock", "XnuPrelink", "DarwinBoot", "GopFramebuffer", "AppleKeyStoreState", "ArmSmmu4K", "AdrenoPM4", "AdrenoFirmware"]
 
 [kernel]
 # Storage archives (the UniXNU-alioth chain): ShengUfs is checked but not bound by itself, because the
@@ -23,7 +25,7 @@ config_fragments = ["arch:configs/common.config", "soc:configs/sm8250.config", "
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
 # cas-armcpu-asm-fix.py must run before component:ArmCpu: it stages ArmCpu with the
 # Darwin assembler separator fix that upstream ArmCpu 9066b53 still lacks.
-archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "component:ShengUfs", "build-storage-bindings.py --component NativeUfs --archive libShengUfs.a --directory build/sheng-ufs --verify-only", "component:VirtioMmioBlock", "component:RamBlock", "build-storage-bindings.py --component NativeRamBlock --archive libRamBlock.a --directory build/ram-block", "build-arm-driver.py VirtioMmioBlock --verified-root --verified-root-bundle", "build-storage-bindings.py --component NativeVirtioBlock --archive libVirtioMmioBlock.a --directory build/virtio-mmio-block-verified-bundle --include-object build/sheng-ufs/NativeUfs.o", "cas-verified-root-probe.py --component os --include-systemos", "build-link-stubs.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py", "component:AppleKeyStoreState", "build-cas-touch.py", "build-gop-legacy-display.py"]
+archives = ["build-corecrypto-14.py", "build-corecrypto-14.py --namespace", "component:ArmDTPlatform", "cas-armcpu-asm-fix.py", "component:ArmCpu", "component:SoftwareAES", "build-software-aes-bindings.py", "component:ShengUfs", "build-storage-bindings.py --component NativeUfs --archive libShengUfs.a --directory build/sheng-ufs --verify-only", "component:VirtioMmioBlock", "component:RamBlock", "build-storage-bindings.py --component NativeRamBlock --archive libRamBlock.a --directory build/ram-block", "build-arm-driver.py VirtioMmioBlock --verified-root --verified-root-bundle", "build-storage-bindings.py --component NativeVirtioBlock --archive libVirtioMmioBlock.a --directory build/virtio-mmio-block-verified-bundle --include-object build/sheng-ufs/NativeUfs.o", "cas-verified-root-probe.py --component os --include-systemos", "build-link-stubs.py", "build-mockfs-fixture.py", "build-platform-power.py", "build-libpthread-kernel.py", "component:AppleKeyStoreState", "build-cas-touch.py", "build-gop-legacy-display.py", "build-adreno650.py"]
 
 [device_tree]
 source = "device:dts/cas.dts"

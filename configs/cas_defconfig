@@ -38,7 +38,12 @@ CONFIG_XNU_OWNER_DATA_VOLUME_UUID="7CF327EA-B640-43AC-B90E-8D3F25C9989E"
 # boot_progress_poll for NativeUfs when CONFIG_XNU_BOOT_PROGRESS is off (scripts/build-link-stubs.py); with it
 # on, the force-loaded libBootProgress.a defines the name and the stub member is never pulled.
 CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"
-# CONFIG_XNU_NATIVE_ADRENO is not set
+# The Adreno 650 GMU path (scripts/build-adreno650.py: the kits, FFT-infra/Adreno650's GMU context, package/a650/A650Gmu.c, the
+# probe package/GpuProbe.cpp and the firmware generated from local.toml [cas] a650_firmware). build-xnu-4k-baseline.sh force-loads
+# build/adreno740/libAdreno740.a; the archive path uses {tree} so both its check and unixnu's see an absolute path. The display
+# probe (LegacyDisplayProbe.cpp) calls cas_gpu_probe, which this archive defines; nothing runs without cas-gpu=<n>.
+CONFIG_XNU_NATIVE_ADRENO=y
+CONFIG_XNU_NATIVE_ADRENO_ARCHIVE="{tree}/build/adreno740/libAdreno740.a"
 
 # Successful observations log and continue; optional GUI/storage experiments remain off.
 # On-screen stage log and console (scripts/build-boot-progress.py): m2b-002 hung with nothing on screen.
