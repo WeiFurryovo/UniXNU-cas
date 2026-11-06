@@ -48,6 +48,7 @@ require(OBJCOPY, 'llvm-objcopy not found')
 PROBE_SOURCE = ROOT / 'kits/cas/LegacyDisplayProbe.cpp'
 KEYSTORE_SOURCE = ROOT / 'kits/cas/KeyStoreProbe.cpp'
 CPUFREQ_SOURCE = ROOT / 'kits/cas/CpuFreqProbe.cpp'
+BUTTONS_SOURCE = ROOT / 'kits/cas/ButtonProbe.cpp'
 
 # 1. The reference candidate: the board's previous kernel, under the name the audit and the bindings read.
 reference = ROOT.parent / 'kernel/kernel.macho'
@@ -295,6 +296,10 @@ run([str(KEYSTORE_SOURCE) if x == str(PROBE_SOURCE) else str(keystore_probe_obj)
 cpufreq_obj = OUT / 'CpuFreqProbe.o'
 run([str(CPUFREQ_SOURCE) if x == str(PROBE_SOURCE) else str(cpufreq_obj) if x == str(probe_obj) else x
      for x in command], cwd=record['directory'])
+# The power and volume keys (UniXNU-alioth's ButtonProbe), same recipe; the display probe starts its thread.
+buttons_obj = OUT / 'ButtonProbe.o'
+run([str(BUTTONS_SOURCE) if x == str(PROBE_SOURCE) else str(buttons_obj) if x == str(probe_obj) else x
+     for x in command], cwd=record['directory'])
 keystore = ROOT / 'build/apple-key-store-state/NativeKeyStoreEvents.o'
 require(keystore.is_file(), 'no NativeKeyStoreEvents.o; component:AppleKeyStoreState must run before this script')
 keystore_late = OUT / 'NativeKeyStoreEvents.late.o'
@@ -314,12 +319,12 @@ archive.unlink(missing_ok=True)
 touch = ROOT / 'build/cas-touch'
 touch_objects = [touch / name for name in ('NativeHidInput.late.o', 'hid-original-bindings.o', 'UmiFtsTouch.o', 'HidInputProbe.o')]
 require(all(o.is_file() for o in touch_objects), 'no touch objects; build-cas-touch.py must run before this script')
-run([AR, 'rcs', archive, late, OUT / 'original-bindings.o', probe_obj, presenter_late, keystore_probe_obj, keystore_late, cpufreq_obj,
+run([AR, 'rcs', archive, late, OUT / 'original-bindings.o', probe_obj, presenter_late, keystore_probe_obj, keystore_late, cpufreq_obj, buttons_obj,
      *touch_objects])
 # build-xnu-4k-baseline.sh rehashes these sources (relative to the tree) before linking the archive.
 sources = [ROOT / 'drivers/GopFramebuffer/NativeLegacyDisplay.cpp', ROOT / 'drivers/GopFramebuffer/NativeLegacyRequest.h',
            ROOT / 'drivers/GopFramebuffer/NativeGOPPresenter.cpp', ROOT / 'drivers/GopFramebuffer/NativeGOPWire.h',
-           PROBE_SOURCE, KEYSTORE_SOURCE, CPUFREQ_SOURCE, *sorted((ROOT / 'kits/cas/touch').glob('*.[ch]*')), ROOT / 'drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp',
+           PROBE_SOURCE, KEYSTORE_SOURCE, CPUFREQ_SOURCE, BUTTONS_SOURCE, ROOT / 'kits/cas/ButtonsCore.h', *sorted((ROOT / 'kits/cas/touch').glob('*.[ch]*')), ROOT / 'drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp',
            OUT / 'OriginalLegacyFramebufferABI.h']
 (OUT / 'build-report.json').write_text(json.dumps(dict(
     source_sha256={str(path.relative_to(ROOT)): sha(path) for path in sources},

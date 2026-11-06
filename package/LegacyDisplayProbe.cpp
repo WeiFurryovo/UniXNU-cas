@@ -510,6 +510,10 @@ void native_legacy_display_late_probe(void) {
     // polls it, which votes each domain once its cores are up.
     extern void sheng_cpufreq_probe(void);
     sheng_cpufreq_probe();
+    // Power and volume keys (cas-bt=<n>, UniXNU-alioth's ButtonProbe): a thread reads the PM8150 PON and GPIO 6 levels
+    // through the SPMI arbiter and hands each change to the HID device's report 2 (touch/NativeHidInput.cpp).
+    extern void cas_buttons_probe(void);
+    cas_buttons_probe();
     // Then touch, as on umi: the ST FTM5 worker (touch/UmiFtsTouch.cpp, cas-fts=1) and the HID publisher that turns
     // its contacts into digitizer reports (touch/HidInputProbe.cpp, offline-hid-input=1). Both are no-ops without
     // their boot arguments.

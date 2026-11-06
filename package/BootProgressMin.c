@@ -838,6 +838,9 @@ extern volatile uint64_t native_data_persist_present __attribute__((weak_import)
 extern volatile uint64_t native_data_persist_writes __attribute__((weak_import));
 extern volatile uint64_t native_data_persist_errors __attribute__((weak_import));
 
+/* The physical keys' row (ButtonProbe.cpp): st 2 = polling, the PON and GPIO 6 APIDs, the pressed mask, reports sent. */
+extern char native_buttons_short[48] __attribute__((weak_import));
+
 static void
 bp_banner_data(void)
 {
@@ -887,6 +890,11 @@ bp_banner_thread(void *argument, int result)
 		}
 		bp_banner_smp();
 		bp_banner_data();
+		if (&native_buttons_short && native_buttons_short[0]) {
+			for (slot = 0; slot < 48; slot++) {
+				boot_progress_ext[4][slot] = native_buttons_short[slot];   /* over the FTS row */
+			}
+		}
 		if (&sheng_cpufreq_poll && &native_cpufreq_short) {
 			sheng_cpufreq_poll();
 			for (slot = 0; native_cpufreq_short[0] && slot < 48; slot++) {
