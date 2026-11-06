@@ -841,7 +841,7 @@ extern volatile uint64_t native_data_persist_errors __attribute__((weak_import))
 /* The physical keys' row (ButtonProbe.cpp): st 2 = polling, the PON and GPIO 6 APIDs, the pressed mask, reports sent. */
 extern char native_buttons_short[48] __attribute__((weak_import));
 /* The Adreno 650 probe's rows (GpuProbe.cpp, cas-gpu=1). */
-extern char native_gpu_short[4][48] __attribute__((weak_import));
+extern char native_gpu_short[6][48] __attribute__((weak_import));
 
 static void
 bp_banner_data(void)
@@ -893,16 +893,19 @@ bp_banner_thread(void *argument, int result)
 		bp_banner_smp();
 		bp_banner_data();
 		if (&native_gpu_short && native_gpu_short[0][0]) {
-			static const unsigned gpu_rows[4] = {0, 1, 5, 6};   /* over the AKS, TOUCH and HID rows */
+			static const unsigned gpu_rows[6] = {0, 1, 2, 4, 5, 6};   /* all but the DATA and FREQ rows */
 			unsigned g;
 
-			for (g = 0; g < 4; g++) {
+			for (g = 0; g < 6; g++) {
+				if (!native_gpu_short[g][0]) {
+					continue;
+				}
 				for (slot = 0; slot < 48; slot++) {
 					boot_progress_ext[gpu_rows[g]][slot] = native_gpu_short[g][slot];
 				}
 			}
 		}
-		if (&native_buttons_short && native_buttons_short[0]) {
+		if (&native_buttons_short && native_buttons_short[0] && !(&native_gpu_short && native_gpu_short[4][0])) {
 			for (slot = 0; slot < 48; slot++) {
 				boot_progress_ext[4][slot] = native_buttons_short[slot];   /* over the FTS row */
 			}
