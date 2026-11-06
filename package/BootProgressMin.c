@@ -783,6 +783,9 @@ extern void thread_deallocate(void *thread);
 extern void IOSleep(unsigned milliseconds);
 extern void umi_touch_snapshot(uint64_t values[32]) __attribute__((weak_import));
 extern int snprintf(char *buffer, unsigned long size, const char *format, ...);
+/* CpuFreqProbe.cpp (sheng-cpufreq): polled here, every 500 ms; its short row replaces the touch EDGE row 7. */
+extern void sheng_cpufreq_poll(void) __attribute__((weak_import));
+extern char native_cpufreq_short[48] __attribute__((weak_import));
 /* ArmCpu's secondary bring-up evidence (sheng-smp=1); weak, so the banner still draws without the component. */
 extern volatile uint32_t armcpu_smp_requested __attribute__((weak_import)), armcpu_smp_running __attribute__((weak_import));
 extern volatile uint32_t armcpu_smp_step[8] __attribute__((weak_import)), armcpu_smp_fail[8] __attribute__((weak_import));
@@ -848,6 +851,12 @@ bp_banner_thread(void *argument, int result)
 			umi_touch_snapshot(values);     /* refreshes rows 2-7 */
 		}
 		bp_banner_smp();
+		if (&sheng_cpufreq_poll && &native_cpufreq_short) {
+			sheng_cpufreq_poll();
+			for (slot = 0; native_cpufreq_short[0] && slot < 48; slot++) {
+				boot_progress_ext[7][slot] = native_cpufreq_short[slot];
+			}
+		}
 		for (slot = 0; slot < 8; slot++, row++) {
 			const char *text = boot_progress_ext[slot];
 

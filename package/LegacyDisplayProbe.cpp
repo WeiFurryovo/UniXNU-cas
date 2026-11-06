@@ -506,6 +506,10 @@ void native_legacy_display_late_probe(void) {
     // a static link would drop it. Opt-in through offline-key-events=1; sheng-aks=1 answers "no passcode, unlocked".
     extern void native_keystore_probe(void);
     native_keystore_probe();
+    // CPU frequency (sheng-cpufreq=<n>, UniXNU-alioth's CpuFreqProbe): maps the three EPSS domains; the banner thread
+    // polls it, which votes each domain once its cores are up.
+    extern void sheng_cpufreq_probe(void);
+    sheng_cpufreq_probe();
     // Then touch, as on umi: the ST FTM5 worker (touch/UmiFtsTouch.cpp, cas-fts=1) and the HID publisher that turns
     // its contacts into digitizer reports (touch/HidInputProbe.cpp, offline-hid-input=1). Both are no-ops without
     // their boot arguments.
