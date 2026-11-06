@@ -1,0 +1,15 @@
+{
+  "sheng_commit": "7562a779ebdbdedc17c4c7274ba993acbbec8188",
+  "hid_commit": "d16d21922fd422740e25ee5c481ffc51de9cfd41",
+  "hid_source_url": "https://github.com/UniXNU/NativeHidInput/blob/d16d21922fd422740e25ee5c481ffc51de9cfd41/NativeHidInput.cpp",
+  "probe_source_url": "https://github.com/UniXNU/UniXNU-sheng/blob/7562a779ebdbdedc17c4c7274ba993acbbec8188/package/HidInputProbe.cpp",
+  "original_hid_source_sha256": "87143752aea74b8b8ad36f838cd5d79ecbaa23e649e1f4b8563822b6a2b3f5b1",
+  "adaptations": [
+    "ST FTM5 GPIO I2C and guarded PM8150A L1 RPMh backend from umi UEFI",
+    "1080x2340 portrait, 10 stable IDs; explicit lift and queued frame delivery",
+    "Exact original HID ABI; version-bound edge dispatch and bounds guard",
+    "32 protocol +64 contact event records and 30 summaries, CRC repeated three times",
+    "No firmware download, flash erase or nonvolatile touch tuning"
+  ],
+  "runtime_qualified": false
+}

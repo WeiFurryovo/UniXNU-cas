@@ -1,0 +1,5 @@
+{
+  "devices/umi/overlay/Platforms/Xiaomi/umiPkg/Library/UmiRpmhLib/UmiRpmh.c": "83ac8481ec9628c0c407139f720f08ab0b76618e120433a61d5993c7db47c039",
+  "devices/umi/overlay/Platforms/Xiaomi/umiPkg/Library/UmiSpmiLib/UmiSpmi.c": "9d890ee6770c39486ef387198c0ab913ef0959de3075c8c5fefe63bd277454bf",
+  "devices/umi/overlay/Platforms/Xiaomi/umiPkg/Drivers/UmiTouchDxe/UmiTouch.c": "a9b4176159934cdc166884986e8da52f30413c1f3556c6b1fbd10786086a6f3d"
+}
