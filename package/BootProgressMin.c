@@ -825,6 +825,31 @@ bp_banner_smp(void)
 	    (unsigned) armcpu_ipi_sent, (unsigned) armcpu_ipi_interrupts, timer, sgi);
 }
 
+/* The persistent Data store (sheng-data-persist, NativeRamBlock over the UFS window) takes row 3 once it has a state:
+ * s = native_data_persist_state (1 blank window left alone, 2 resumed, 3 fresh, 4 refused/failed, 6 read-only resume),
+ * h = the overlay header check (0 valid), g = GPT check before/after (0 unchanged), the window's first LBA, the pages
+ * present in it, and the pages written and errors since boot. */
+extern volatile uint32_t native_data_persist_state __attribute__((weak_import));
+extern volatile uint32_t native_data_persist_header __attribute__((weak_import));
+extern volatile uint32_t native_data_persist_gpt __attribute__((weak_import));
+extern volatile uint32_t native_data_persist_gpt_after __attribute__((weak_import));
+extern volatile uint64_t native_data_persist_first_lba __attribute__((weak_import));
+extern volatile uint64_t native_data_persist_present __attribute__((weak_import));
+extern volatile uint64_t native_data_persist_writes __attribute__((weak_import));
+extern volatile uint64_t native_data_persist_errors __attribute__((weak_import));
+
+static void
+bp_banner_data(void)
+{
+	if (!&native_data_persist_state || !native_data_persist_state) {
+		return;
+	}
+	snprintf(boot_progress_ext[3], 48, "DATA s%u h%u g%x/%x lba=%llx p=%u w=%u e=%u",
+	    native_data_persist_state, native_data_persist_header, native_data_persist_gpt, native_data_persist_gpt_after,
+	    (unsigned long long) native_data_persist_first_lba, (unsigned) native_data_persist_present,
+	    (unsigned) native_data_persist_writes, (unsigned) native_data_persist_errors);
+}
+
 static void
 bp_banner_clean(unsigned row)
 {
@@ -851,6 +876,7 @@ bp_banner_thread(void *argument, int result)
 			umi_touch_snapshot(values);     /* refreshes rows 2-7 */
 		}
 		bp_banner_smp();
+		bp_banner_data();
 		if (&sheng_cpufreq_poll && &native_cpufreq_short) {
 			sheng_cpufreq_poll();
 			for (slot = 0; native_cpufreq_short[0] && slot < 48; slot++) {
