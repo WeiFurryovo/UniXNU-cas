@@ -75,7 +75,10 @@ panic_screen = true
 # Touch (umi attempt 80's set, umi- arguments renamed cas-): cas-fts starts the ST FTM5 worker, cas-fts-gpi drives SE13
 # through GPI DMA, offline-hid-input/-home publish the HID device and sheng-touch-hid its digitizer report. cas-banner
 # repaints the key store and touch rows over the bottom of the frame (BootProgressMin.c) while touch is brought up.
-kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-root=1", "-apfs_shared_datavolume", "panic_on_crash_disabled=1", "offline-mobile-graphics-load=1", "offline-legacy-register=1", "offline-legacy-gop=1", "offline-legacy-phase=4", "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1", "offline-legacy-cpu-present=1", "offline-legacy-unit-scale=2", "sheng-vsync=60", "offline-key-events=1", "sheng-aks=1", "sheng-disable-watchdogd=1", "sheng-lite=1", "sheng-disable-jobs=com.apple.liveactivitiesd,com.apple.cryptexd,com.apple.routined", "cas-fts=1", "cas-fts-gpi=1", "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1", "cas-banner=1"]
+# SMP (umi's qualified set, same silicon and firmware family): sheng-smp=1 starts cpu1-7 by PSCI CPU_ON, IPIs stay SGIs
+# (armcpu-spi-ipi=0) and armcpu-self-ipi=1 has each new core signal itself so XNU enables its IPI. armcpu-diagnostics
+# keeps ArmCpu's step counters, which the banner shows in place of the touch firmware rows.
+kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-root=1", "-apfs_shared_datavolume", "panic_on_crash_disabled=1", "offline-mobile-graphics-load=1", "offline-legacy-register=1", "offline-legacy-gop=1", "offline-legacy-phase=4", "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1", "offline-legacy-cpu-present=1", "offline-legacy-unit-scale=2", "sheng-vsync=60", "offline-key-events=1", "sheng-aks=1", "sheng-disable-watchdogd=1", "sheng-lite=1", "sheng-disable-jobs=com.apple.liveactivitiesd,com.apple.cryptexd,com.apple.routined", "cas-fts=1", "cas-fts-gpi=1", "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1", "cas-banner=1", "sheng-smp=1", "armcpu-spi-ipi=0", "armcpu-self-ipi=1", "armcpu-diagnostics=1"]
 
 [payload.adt]
 chip_id = "8011"

@@ -148,4 +148,14 @@
     };
 };
 
+// All eight kona cores (four Cortex-A55, four Cortex-A77); ArmCpu starts cpu1-7 by PSCI CPU_ON under sheng-smp=1.
+// No unixnu,cluster-type yet: that needs native-smp-type-clusters.patch (UniXNU-alioth), so the first SMP boot
+// keeps one homogeneous cluster.
 &cpu0 { status = "okay"; };
+&cpu1 { status = "okay"; };
+&cpu2 { status = "okay"; };
+&cpu3 { status = "okay"; };
+&cpu4 { status = "okay"; };
+&cpu5 { status = "okay"; };
+&cpu6 { status = "okay"; };
+&cpu7 { status = "okay"; };

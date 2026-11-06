@@ -769,8 +769,8 @@ boot_progress_pulse_anchor(uintptr_t base, uint64_t bytes, unsigned width, unsig
 	return 0;
 }
 
-/* Extra panel rows: 0-1 the key store (KeyStoreProbe.cpp), 2-7 the touch driver (touch/UmiFtsTouch.cpp). Drawn only by
- * the banner below. */
+/* Extra panel rows: 0-1 the key store (KeyStoreProbe.cpp), 2-7 the touch driver (touch/UmiFtsTouch.cpp), 2-3 replaced by
+ * the SMP rows under sheng-smp. Drawn only by the banner below. */
 char boot_progress_ext[8][48];
 
 /* cas-banner=1: once the display owns the scan-out buffer the panel above is gone, so a thread repaints the non-empty
@@ -782,6 +782,45 @@ extern int kernel_thread_start(void (*entry)(void *, int), void *argument, void 
 extern void thread_deallocate(void *thread);
 extern void IOSleep(unsigned milliseconds);
 extern void umi_touch_snapshot(uint64_t values[32]) __attribute__((weak_import));
+extern int snprintf(char *buffer, unsigned long size, const char *format, ...);
+/* ArmCpu's secondary bring-up evidence (sheng-smp=1); weak, so the banner still draws without the component. */
+extern volatile uint32_t armcpu_smp_requested __attribute__((weak_import)), armcpu_smp_running __attribute__((weak_import));
+extern volatile uint32_t armcpu_smp_step[8] __attribute__((weak_import)), armcpu_smp_fail[8] __attribute__((weak_import));
+extern volatile int32_t armcpu_smp_psci_rc[8] __attribute__((weak_import));
+extern volatile uint32_t armcpu_core_timer[8] __attribute__((weak_import)), armcpu_core_sgi[8] __attribute__((weak_import));
+extern volatile uint64_t armcpu_ipi_sent __attribute__((weak_import)), armcpu_ipi_interrupts __attribute__((weak_import));
+
+/* Rows 2-3 (the touch firmware and identity, recorded once on m6-001) become the SMP rows while sheng-smp is set: the
+ * step of each core (7 = running), the first failing core's PSCI result and failure code, and the least timer and IPI
+ * interrupt counts taken by any secondary core, which stay 0 if one never ticks. */
+static void
+bp_banner_smp(void)
+{
+	unsigned core, timer = ~0u, sgi = ~0u, failed = 0;
+	int rc = 0;
+
+	if (!&armcpu_smp_step || !&armcpu_smp_requested || !armcpu_smp_requested) {
+		return;
+	}
+	for (core = 1; core < 8; core++) {
+		if (armcpu_core_timer[core] < timer) {
+			timer = armcpu_core_timer[core];
+		}
+		if (armcpu_core_sgi[core] < sgi) {
+			sgi = armcpu_core_sgi[core];
+		}
+		if (!failed && (armcpu_smp_psci_rc[core] != 0 || armcpu_smp_fail[core] != 0)) {
+			failed = core;
+			rc = armcpu_smp_psci_rc[core];
+		}
+	}
+	snprintf(boot_progress_ext[2], 48, "SMP req=%u run=%u st=%u%u%u%u%u%u%u%u bad=%u/%d/%u",
+	    armcpu_smp_requested, armcpu_smp_running, armcpu_smp_step[0], armcpu_smp_step[1], armcpu_smp_step[2],
+	    armcpu_smp_step[3], armcpu_smp_step[4], armcpu_smp_step[5], armcpu_smp_step[6], armcpu_smp_step[7],
+	    failed, rc, failed ? armcpu_smp_fail[failed] : 0);
+	snprintf(boot_progress_ext[3], 48, "IPI tx=%u rx=%u min tmr=%u sgi=%u",
+	    (unsigned) armcpu_ipi_sent, (unsigned) armcpu_ipi_interrupts, timer, sgi);
+}
 
 static void
 bp_banner_clean(unsigned row)
@@ -808,6 +847,7 @@ bp_banner_thread(void *argument, int result)
 
 			umi_touch_snapshot(values);     /* refreshes rows 2-7 */
 		}
+		bp_banner_smp();
 		for (slot = 0; slot < 8; slot++, row++) {
 			const char *text = boot_progress_ext[slot];
 
