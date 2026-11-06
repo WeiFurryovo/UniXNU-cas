@@ -865,10 +865,20 @@ bp_banner_clean(unsigned row)
 static void
 bp_banner_thread(void *argument, int result)
 {
-	(void) argument;
+	unsigned draw = argument != NULL;
+
 	(void) result;
 	for (;;) {
 		unsigned slot, column, row = g_screen.rows - 9u;
+
+		if (!draw) {
+			/* No banner: the thread only polls the CPU frequency vote, which nothing else drives. */
+			if (&sheng_cpufreq_poll) {
+				sheng_cpufreq_poll();
+			}
+			IOSleep(500);
+			continue;
+		}
 
 		if (&umi_touch_snapshot) {
 			uint64_t values[32];
@@ -907,15 +917,20 @@ static void
 bp_banner_start(void)
 {
 	static unsigned started;
-	unsigned enabled = 0;
+	unsigned banner = 0, cpufreq = 0, enabled;
 	void *thread = NULL;
 
-	if (started || !g_screen.bound || g_screen.rows < 10 ||
-	    !PE_parse_boot_argn("cas-banner", &enabled, sizeof(enabled)) || enabled != 1) {
+	if (started) {
+		return;
+	}
+	enabled = PE_parse_boot_argn("cas-banner", &banner, sizeof(banner)) && banner == 1 && g_screen.bound &&
+	    g_screen.rows >= 10;
+	if (!enabled && !(PE_parse_boot_argn("sheng-cpufreq", &cpufreq, sizeof(cpufreq)) && cpufreq != 0)) {
 		return;
 	}
 	started = 1;
-	if (kernel_thread_start(bp_banner_thread, NULL, &thread) == 0) {
+	/* The argument only says whether to draw. */
+	if (kernel_thread_start(bp_banner_thread, enabled ? (void *) 1 : NULL, &thread) == 0) {
 		thread_deallocate(thread);
 	}
 }
