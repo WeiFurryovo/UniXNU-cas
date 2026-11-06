@@ -5,6 +5,8 @@ name: Data seed
 #   scripts/prepare-owner-data-fixture.py  32 MiB APFS volume holding the OS volume's initial /private/var
 #   drivers/DarwinBoot/Test/packed_ramdisk  DBRDISK1 packing (nonzero pages only)
 #   scripts/seed-data-grow.py               container grown to size_gib (3 GiB is what UniXNU-alioth mounts)
+#   scripts/seed-data-skip-setup.py         with skip_setup, a copy of the grown seed with Setup marked done
+#                                           (--no-auto-dim: cas has no power button to wake a dimmed panel)
 #
 # Only the OS member (044-76040-038.dmg) of the restore image is fetched, through HTTP ranges, and it is
 # deleted again; only the seed is uploaded. The seed holds files from the restore image, so it is
@@ -24,7 +26,11 @@ on:
       size_gib:
         description: Grown container size in GiB (3..1024); 0 keeps only the 32 MiB fixture
         required: true
-        default: "3"
+        default: "32"
+      skip_setup:
+        description: Also write a copy of the grown seed that boots past Setup (no Wi-Fi to activate on cas)
+        required: true
+        default: "true"
       unixnu_ref:
         description: UniXNU commit the seed tools come from
         required: true
@@ -37,7 +43,9 @@ env:
   IPSW_URL: https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw
   OS_MEMBER: 044-76040-038.dmg
   OS_MEMBER_SHA256: 3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d
-  SIZE_GIB: ${{ inputs.size_gib || '3' }}
+  # 32 GiB: the persistent store window is the seed's size and must stay under a quarter of userdata (~56 GiB).
+  SIZE_GIB: ${{ inputs.size_gib || '32' }}
+  SKIP_SETUP: ${{ inputs.skip_setup || 'true' }}
 
 jobs:
   seed:
@@ -157,11 +165,17 @@ jobs:
               rm -f "$out/cas-data-${SIZE_GIB}g.dbr" "$out/cas-data-${SIZE_GIB}g.dbr.json"
             fi
           fi
+          # Setup cannot finish on cas (activation needs a network), so the store's seed skips it. Same volume UUID.
+          if [ "$SKIP_SETUP" = true ] && [ -f "$out/cas-data-${SIZE_GIB}g.dbr" ]; then
+            python3 unixnu/scripts/seed-data-skip-setup.py "$out/cas-data-${SIZE_GIB}g.dbr" \
+              "$out/cas-data-${SIZE_GIB}g-skip-setup.dbr" --no-auto-dim
+          fi
           uuid=$(python3 -c "import json,os;print(json.load(open(os.environ['RUNNER_TEMP']+'/out/fixture-seed.json'))['volume_uuid'])")
           {
             echo "unixnu $(git -C unixnu rev-parse HEAD)"
             echo "os_member $OS_MEMBER_SHA256"
             echo "size_gib $SIZE_GIB"
+            echo "skip_setup $SKIP_SETUP"
             echo "volume_uuid $uuid"
             (cd "$out" && shasum -a 256 *.dbr)
           } | tee "$out/inputs.txt"
