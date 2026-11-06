@@ -827,8 +827,8 @@ bp_banner_smp(void)
 
 /* The persistent Data store (sheng-data-persist, NativeRamBlock over the UFS window) takes row 3 once it has a state:
  * s = native_data_persist_state (1 blank window left alone, 2 resumed, 3 fresh, 4 refused/failed, 6 read-only resume),
- * h = the overlay header check (0 valid), g = GPT check before/after (0 unchanged), the window's first LBA, the pages
- * present in it, and the pages written and errors since boot. */
+ * h = the overlay header check (0 valid), g = GPT check before and after (00 unchanged), the errors, the pages present
+ * in the window and the pages written since boot (the window's LBA, 0x3a4b7e2, was checked on m3a-001). */
 extern volatile uint32_t native_data_persist_state __attribute__((weak_import));
 extern volatile uint32_t native_data_persist_header __attribute__((weak_import));
 extern volatile uint32_t native_data_persist_gpt __attribute__((weak_import));
@@ -844,10 +844,10 @@ bp_banner_data(void)
 	if (!&native_data_persist_state || !native_data_persist_state) {
 		return;
 	}
-	snprintf(boot_progress_ext[3], 48, "DATA s%u h%u g%x/%x lba=%llx p=%u w=%u e=%u",
+	snprintf(boot_progress_ext[3], 48, "DATA s%u h%u g%x%x e=%u p=%u w=%u",
 	    native_data_persist_state, native_data_persist_header, native_data_persist_gpt, native_data_persist_gpt_after,
-	    (unsigned long long) native_data_persist_first_lba, (unsigned) native_data_persist_present,
-	    (unsigned) native_data_persist_writes, (unsigned) native_data_persist_errors);
+	    (unsigned) native_data_persist_errors, (unsigned) native_data_persist_present,
+	    (unsigned) native_data_persist_writes);
 }
 
 static void

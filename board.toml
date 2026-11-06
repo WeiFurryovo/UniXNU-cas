@@ -64,7 +64,6 @@ panic_screen = true
 # personality, which publishes the SHNGROOT windows of userdata (m2a-001 proved the reads with
 # native-ufs-probe=10). -apfs_shared_datavolume lets keybagd take the shared-Data path: there is
 # no SEP here. panic_on_crash_disabled keeps one crashing daemon from panicking the bring-up.
-# No sheng-data-persist: the first root boots keep Data in RAM and write nothing to UFS.
 # offline-mobile-graphics-load/-legacy-*: the CPU-presented display (UniXNU-umi attempt 80's set). register+phase=4
 # publish NativeLegacyDisplay on the firmware frame buffer; pm/validate/transfer/cpu-present let it accept, copy and
 # retire single-layer BGRA frames; unit-scale=2 publishes display-scale 2 (540x1170 points) in /chosen.
@@ -81,10 +80,12 @@ panic_screen = true
 # sheng-cpufreq=3 (UniXNU-alioth's CpuFreqProbe): votes each kona EPSS domain (cpu0-3, cpu4-6, cpu7) its highest
 # non-turbo level once the domain reads enabled; m4-001 had all eight cores but felt no faster than one, so the cores'
 # firmware-left clock is the next suspect. Banner row 8 shows the current and pre-vote MHz per domain.
-# sheng-data-persist=1: the Data store window at the end of userdata (below the 1 GiB log reserve, clear of the root
-# image) is opened read-only (ShengUfs native_ufs_store_*, NativeRamBlock's overlay): it proves the window and reads its
-# header, writes nothing, and Data stays in RAM. The banner's row 4 shows the store state.
-kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-root=1", "-apfs_shared_datavolume", "panic_on_crash_disabled=1", "offline-mobile-graphics-load=1", "offline-legacy-register=1", "offline-legacy-gop=1", "offline-legacy-phase=4", "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1", "offline-legacy-cpu-present=1", "offline-legacy-unit-scale=2", "sheng-vsync=60", "offline-key-events=1", "sheng-aks=1", "sheng-disable-watchdogd=1", "sheng-lite=1", "sheng-disable-jobs=com.apple.liveactivitiesd,com.apple.cryptexd,com.apple.routined", "cas-fts=1", "cas-fts-gpi=1", "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1", "cas-banner=1", "sheng-smp=1", "armcpu-spi-ipi=0", "armcpu-self-ipi=1", "armcpu-diagnostics=1", "sheng-cpufreq=3", "sheng-data-persist=1"]
+# sheng-data-persist=2: the Data store window at the end of userdata (below the 1 GiB log reserve, clear of the root
+# image; ShengUfs native_ufs_store_*, NativeRamBlock's overlay) holds every Data page changed since the seed, written
+# through with forced unit access, so Data survives a reboot. m3a-001 proved the window read-only (=1): s1 blank,
+# GPT unchanged, LBA 0x3a4b7e2 for the 3 GiB seed. The window belongs to this seed: keep the seed and the default log
+# reserve, or the store starts over. sheng-data-reset=1 discards it (=2 also re-runs Setup). Banner row 4 shows it.
+kernel_args = ["-v", "keepsyms=1", "debug=0x14e", "kt_fixed_zones=120", "sheng-pmgr=2", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0", "native-ufs-root=1", "-apfs_shared_datavolume", "panic_on_crash_disabled=1", "offline-mobile-graphics-load=1", "offline-legacy-register=1", "offline-legacy-gop=1", "offline-legacy-phase=4", "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1", "offline-legacy-cpu-present=1", "offline-legacy-unit-scale=2", "sheng-vsync=60", "offline-key-events=1", "sheng-aks=1", "sheng-disable-watchdogd=1", "sheng-lite=1", "sheng-disable-jobs=com.apple.liveactivitiesd,com.apple.cryptexd,com.apple.routined", "cas-fts=1", "cas-fts-gpi=1", "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1", "cas-banner=1", "sheng-smp=1", "armcpu-spi-ipi=0", "armcpu-self-ipi=1", "armcpu-diagnostics=1", "sheng-cpufreq=3", "sheng-data-persist=2"]
 
 [payload.adt]
 chip_id = "8011"
@@ -94,6 +95,8 @@ psci_method = "smc"
 unique_chip_id = "required"
 # The Data seed reaches the kernel packed (DBRDISK1): /chosen/memory-map/PackedRAMDisk.
 packed_data_ramdisk = true
+# Data is persistent (sheng-data-persist=2), so /chosen carries no ephemeral-storage.
+persistent_data = true
 # /chosen/root-matching: the OS window's APFS volume UUID (the same IPSW as alioth/umi/sheng).
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 
