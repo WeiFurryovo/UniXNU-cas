@@ -54,6 +54,16 @@ def checkout(path, pin):
     run('git', '-C', path, 'checkout', '-q', '--detach', 'FETCH_HEAD')
 
 
+# AdrenoMetal@6416a76's NativeAdrenoMetalPlugin.mm calls writeTask() and patchFramebufferBranch() only under
+# #if defined(__arm64e__) (the iPadOS 27 build), so the arm64 (iOS 17) build stops on -Werror,-Wunused-function
+# (run 42302164064). Only that warning stays a warning; the plugin's sources and their build ID are unchanged.
+plugin_script = ROOT / 'scripts/build-adreno-metal-plugin.py'
+text = plugin_script.read_text()
+if "'-Wno-error=unused-function'" not in text:
+    if text.count("'-Wextra', '-Werror',") != 1:
+        raise SystemExit('build-adreno-metal-plugin.py: compiler flags not found')
+    plugin_script.write_text(text.replace("'-Wextra', '-Werror',", "'-Wextra', '-Werror', '-Wno-error=unused-function',"))
+
 pins = json.loads((ROOT / 'scripts/data/adreno-compiler-inputs.json').read_text())
 for patch in pins['patches']:
     normalize_new_files(ROOT / patch)

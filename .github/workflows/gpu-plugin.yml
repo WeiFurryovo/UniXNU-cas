@@ -131,7 +131,7 @@ jobs:
       - name: Collect the outputs and logs
         if: always()
         run: |
-          set -uo pipefail
+          set +e
           out="$RUNNER_TEMP/out"
           mkdir -p "$out/logs"
           cp "$RUNNER_TEMP/build.log" "$RUNNER_TEMP/toolchain.txt" "$out/logs/" 2>/dev/null
