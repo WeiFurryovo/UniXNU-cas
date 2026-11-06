@@ -79,7 +79,9 @@ panic_screen = true
 # keeps ArmCpu's step counters, which the banner shows in place of the touch firmware rows.
 # sheng-cpufreq=3 (UniXNU-alioth's CpuFreqProbe): votes each kona EPSS domain (cpu0-3, cpu4-6, cpu7) its highest
 # non-turbo level once the domain reads enabled; m4-001 had all eight cores but felt no faster than one, so the cores'
-# firmware-left clock is the next suspect. Banner row 8 shows the current and pre-vote MHz per domain.
+# firmware-left clock is the next suspect. Banner row 8 shows the current and pre-vote MHz per domain. The same poll
+# steps the domains down one level per 500 ms while the hottest CPU sensor of TSENS0 reads >= cas-thermal-hot (90 C)
+# and back up once it reads <= cas-thermal-cool (80 C); th-001 (45/40 C) read ~30 C idle, rising with load.
 # sheng-data-persist=2: the Data store window at the end of userdata (below the 1 GiB log reserve, clear of the root
 # image; ShengUfs native_ufs_store_*, NativeRamBlock's overlay) holds every Data page changed since the seed, written
 # through with forced unit access, so Data survives a reboot. m3a-001 proved the window read-only (=1): s1 blank,

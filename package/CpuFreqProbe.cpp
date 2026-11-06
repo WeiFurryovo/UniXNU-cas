@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Default-off CPU frequency control for this board's EPSS frequency domains (kona).
 // Copied from UniXNU-alioth@520581a package/CpuFreqProbe.cpp (same SoC, same EPSS windows); the cas change is the short
-// banner row native_cpufreq_short, and sheng_cpufreq_poll is called by the banner thread (BootProgressMin.c).
+// banner row native_cpufreq_short, sheng_cpufreq_poll is called by the banner thread (BootProgressMin.c) every 500 ms, and a
+// thermal step: nothing else here throttles (the stock kernel's LMh and thermal zones are not running), so the poll reads
+// TSENS0 and steps the domains down one LUT level while the hottest CPU sensor is at or above cas-thermal-hot (deg C,
+// default 90) and back up toward the vote while it is at or below cas-thermal-cool (default 80); cas-thermal=0 disables it.
+// TSENS0 is the cas live FDT's tsens@c222000 (TM 0xc263000, "qcom,tsens24xx"); its sensors 1-4 are cpu-0-0..3, 5-6 cpuss
+// and 7-14 cpu-1-0..7 (the live FDT's thermal zones). Register layout: Linux tsens-v2 (TM_Sn_STATUS 0xa0 + 4n, last
+// temperature bits 11:0 in signed deci-degrees, valid bit 21).
 // Adapted from the reference board's CpuFreqProbe (UniXNU-sheng, SM8550): the EPSS register
 // layout is the same qcom-cpufreq-hw-epss interface, and the SM8250 addresses and domain CPU
 // counts come from this board's own device tree (kona.dtsi:325-330) and the same SoC's pipa
@@ -28,7 +34,9 @@
 
 extern "C" {
 char native_cpufreq_row[120];
-char native_cpufreq_short[48];  // "FREQ e<enables> <current MHz per domain> pre <MHz before the vote>"
+char native_cpufreq_short[48];  // "FREQ <current MHz per domain> T<hottest CPU sensor> L<level per domain> s<throttle steps>"
+volatile int32_t native_cpu_temp_deci = -1000;
+volatile uint32_t native_thermal_steps;
 volatile uint32_t native_cpufreq_stage;
 }
 
@@ -47,9 +55,15 @@ struct Window {
     int voted;          // level written, -1 none
     uint32_t votedKHz;
     uint32_t preKHz;    // domain state the first time it read enabled, before the vote
+    int level;          // level written now (the vote, or lower while hot)
 };
 Window gDomain[3];
 unsigned gMode;
+constexpr uint64_t kTsens0Tm = 0x0c263000;
+constexpr uint32_t kTsensStatus = 0xa0;
+IOMemoryMap *gTsensMap;
+uintptr_t gTsens;
+int32_t gHotDeci = 900, gCoolDeci = 800;
 uint32_t gCapKHz;
 IOLock *gLock;
 
@@ -78,6 +92,14 @@ int pickLevel(uintptr_t va, bool turboMatters, uint32_t *khzOut, unsigned *rowsO
     return best;
 }
 
+void setLevel(unsigned d, int level) {
+    Window &w = gDomain[d];
+    wr32(w.va, kRegPerfState, (uint32_t)level);
+    if (rd32(w.va, kRegDcvsCtrl) & 1)
+        for (unsigned c = 1; c < kDomainCpus[d]; ++c) wr32(w.va, kRegPerfState + c * 4, (uint32_t)level);
+    w.level = level;
+}
+
 bool mapWindow(Window &w, uint64_t base) {
     IODeviceMemory *memory = IODeviceMemory::withRange(base, kWindowSize);
     w.map = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
@@ -93,11 +115,34 @@ void voteDomain(unsigned d) {
     int level = pickLevel(w.va, true, &khz, nullptr);
     if (level < 0) return;
     w.preKHz = (rd32(w.va, kRegDomainState) & 0xff) * kXoKHz;
-    wr32(w.va, kRegPerfState, (uint32_t)level);
-    if (rd32(w.va, kRegDcvsCtrl) & 1)
-        for (unsigned c = 1; c < kDomainCpus[d]; ++c) wr32(w.va, kRegPerfState + c * 4, (uint32_t)level);
     w.voted = level;
     w.votedKHz = khz;
+    setLevel(d, level);
+}
+
+// Hottest valid CPU sensor of TSENS0 (1-14), in deci-degrees; -1000 when none reads valid.
+int32_t cpuTemperature() {
+    int32_t hottest = -1000;
+    for (unsigned i = 1; gTsens && i <= 14; ++i) {
+        uint32_t v = rd32(gTsens, kTsensStatus + i * 4);
+        if (!(v >> 21 & 1)) continue;
+        int32_t t = (int32_t)(v << 20) >> 20;
+        if (t > hottest) hottest = t;
+    }
+    return hottest;
+}
+
+// One thermal step per poll: down a level in every voted domain while hot, back up toward the vote once cool.
+void thermalStep() {
+    int32_t t = cpuTemperature();
+    native_cpu_temp_deci = t;
+    if (t == -1000) return;
+    for (unsigned d = 0; d < 3; ++d) {
+        Window &w = gDomain[d];
+        if (w.voted < 0) continue;
+        if (t >= gHotDeci && w.level > 0) {setLevel(d, w.level - 1); native_thermal_steps = native_thermal_steps + 1;}
+        else if (t <= gCoolDeci && w.level < w.voted) setLevel(d, w.level + 1);
+    }
 }
 
 void refreshRow() {
@@ -115,16 +160,17 @@ void refreshRow() {
             n += (unsigned)snprintf(out + n, cap - n, " d%u:e%u c%u p%u", d, enable, state, rd32(w.va, kRegPerfState));
     }
 
-    uint32_t mhz[3] = {}, pre[3] = {}, enabled[3] = {};
+    uint32_t mhz[3] = {};
+    int level[3] = {-1, -1, -1};
     for (unsigned d = 0; d < 3; ++d) {
         Window &w = gDomain[d];
         if (!w.va) continue;
-        enabled[d] = rd32(w.va, kRegEnable) & 1;
         mhz[d] = (rd32(w.va, kRegDomainState) & 0xff) * kXoKHz / 1000;
-        pre[d] = w.preKHz / 1000;
+        if (w.voted >= 0) level[d] = w.level;
     }
-    snprintf(native_cpufreq_short, sizeof(native_cpufreq_short), "FREQ e%u%u%u %u %u %u pre %u %u %u", enabled[0],
-             enabled[1], enabled[2], mhz[0], mhz[1], mhz[2], pre[0], pre[1], pre[2]);
+    int32_t t = native_cpu_temp_deci, whole = t / 10, tenth = (t < 0 ? -t : t) % 10;
+    snprintf(native_cpufreq_short, sizeof(native_cpufreq_short), "FREQ %u %u %u T%d.%d L%d/%d/%d s%u", mhz[0], mhz[1],
+             mhz[2], (int)whole, (int)tenth, level[0], level[1], level[2], native_thermal_steps);
 }
 }
 
@@ -136,6 +182,7 @@ extern "C" void sheng_cpufreq_poll(void) {
         bool wanted = gMode >= 3 || (gMode == 2 && d == 0);
         if (w.va && wanted && w.voted < 0 && (rd32(w.va, kRegEnable) & 1)) voteDomain(d);
     }
+    if (gTsens) thermalStep();
     refreshRow();
     native_cpufreq_stage = 2;
     IOLockUnlock(gLock);
@@ -151,6 +198,19 @@ extern "C" void sheng_cpufreq_probe(void) {
     native_cpufreq_stage = 1;
     gCapKHz = capMHz * 1000;
     for (unsigned d = 0; d < 3; ++d) mapWindow(gDomain[d], kDomainBase[d]);
+    unsigned thermal = 1, hot = 90, cool = 80;
+    PE_parse_boot_argn("cas-thermal", &thermal, sizeof(thermal));
+    PE_parse_boot_argn("cas-thermal-hot", &hot, sizeof(hot));
+    PE_parse_boot_argn("cas-thermal-cool", &cool, sizeof(cool));
+    if (cool >= hot) cool = hot - 5;
+    gHotDeci = (int32_t)hot * 10;
+    gCoolDeci = (int32_t)cool * 10;
+    if (thermal) {
+        IODeviceMemory *memory = IODeviceMemory::withRange(kTsens0Tm, kWindowSize);
+        gTsensMap = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+        if (memory) memory->release();
+        gTsens = gTsensMap ? static_cast<uintptr_t>(gTsensMap->getVirtualAddress()) : 0;
+    }
     gMode = mode;
     sheng_cpufreq_poll();
 }
