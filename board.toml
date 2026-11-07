@@ -54,9 +54,11 @@ windows = [
 volume = "CAS_IOS17"
 # The owner-root kernel carries the signed OS and SystemOS block hashes (~73 MB) and the payload files
 # take 120.7 MiB since the GPU driver's mode 11 objects (gpu-005); the builder wants 5% headroom, which 127 MiB
-# missed by 70 KB. uefi-cas CAS_PAYLOAD_SIZE allows up to 192 MiB. The boot image (128.84 MiB) is now larger than
-# the 128 MiB boot partition: it is for fastboot boot only.
-size_mib = 128
+# missed by 70 KB. Since gpu-006 the payload also carries the GPU addon (12.1 MB, the Adreno Metal plugin and Turnip, named by
+# gpu_addon in the ignored unixnu.local.toml; the kernel installs it only with sheng-gpu-addon=1), so 144 MiB. uefi-cas
+# CAS_PAYLOAD_SIZE and scripts/cas_bootimg.py RAMDISK_MAX allow up to 192 MiB, ABL's fastboot download 768 MiB. The boot image
+# is larger than the 128 MiB boot partition: it is for fastboot boot only.
+size_mib = 144
 loader = "firmware"
 title = "cas iPadOS 17"
 timeout = 3
@@ -94,6 +96,11 @@ panic_screen = true
 # cas-bt=2 (UniXNU-alioth's ButtonProbe, package/ButtonProbe.cpp): power, volume down (PM8150 PON) and volume up
 # (PM8150 GPIO 6) read over the SPMI arbiter every 50 ms, reads only; each change goes to the HID device's report 2.
 # bt-001: PON APID 13, GPIO APID 25, the power key locks the screen.
+# GPU (off by default; the test arguments of gpu-006): cas-gpu=12 runs the Adreno 650 probe through publication, the self test
+# and the Metal accelerator (package/GpuProbe.cpp); sheng-gpu-addon=1 installs the payload's GPU addon into Data and mounts it
+# over /System/Library/Extensions (the owner trust bundle carries the plugin's and Turnip's CDHashes); sheng-fb-gpu=1 offers
+# each composited frame to the plugin in backboardd, whose GPU copies it into the scanout; sheng-fb-bgra=1 keeps Turnip in
+# system memory with the 8-bit BGRA framebuffer (UniXNU-alioth's set, without its DPU scanout).
 # The diagnostic banner (cas-banner=1, BootProgressMin.c: key store, SMP, Data store, touch and CPU frequency rows over
 # the bottom of the frame) is off now that the home screen is reached; add the argument back to see it. Without it the
 # banner's thread still runs, without drawing, to poll the CPU frequency vote.

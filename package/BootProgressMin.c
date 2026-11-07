@@ -840,7 +840,7 @@ extern volatile uint64_t native_data_persist_errors __attribute__((weak_import))
 
 /* The physical keys' row (ButtonProbe.cpp): st 2 = polling, the PON and GPIO 6 APIDs, the pressed mask, reports sent. */
 extern char native_buttons_short[48] __attribute__((weak_import));
-/* The Adreno 650 probe's rows (GpuProbe.cpp, cas-gpu=1..11; formats in its header). */
+/* The Adreno 650 probe's rows (GpuProbe.cpp, cas-gpu=1..12; formats in its header). */
 extern char native_gpu_short[6][48] __attribute__((weak_import));
 
 static void

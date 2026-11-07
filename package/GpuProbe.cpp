@@ -45,9 +45,20 @@
 //      (2 s), GetTimestamp, clientClose), and alioth's replay round of a logged client IB over 48 bytes (none exists on cas, so
 //      it is skipped). cas-gpu-selftest=0 skips the rounds; cas-gpu-lowiova=1 maps the BOs at 0x310000/0x311000 and
 //      cas-gpu-nop=1 sends a single CP_NOP instead (alioth's pipa-gpu-lowiova/-nop diagnostics). Then the thread stays: a live
-//      row every 2 s for the rest of the boot. User space can open the published service only with the GPU addon's plugin,
-//      which cas does not carry.
-// Mode 12 and above (alioth's metal(): the staged accelerator for Metal) are not ported: cas_gpu_probe refuses them.
+//      row every 2 s for the rest of the boot. User space can open the published service only with the GPU addon's plugin.
+//  12  as 11, then, only once the self test passed (or was skipped), alioth's metal() (f188378 GpuProbe.cpp:1519-1607): the
+//      original IOGPUFamily kext loaded (OSKextLoadKextWithIdentifier), its IOAcceleratorES metaclass found at 136 bytes, the
+//      staged AGXAccelerator's static initializer run between preModLoad and postModLoad (scripts/build-adreno650.py strips it
+//      from __mod_init_func and binds its three IOAcceleratorES imports to the 21H461 addresses it qualifies against this
+//      board's kernel), one instance attached to the platform expert and registered with MetalPluginName NativeAdrenoMetal,
+//      MetalPluginClassName NativeAdrenoMetalDevice, NativeSandboxGrantProcess (alioth's list: the processes whose sandbox
+//      verdict the kernel's open path replaces, patches/xnu/zzw-native-adreno-sandbox-grant.patch), NativeTurnipDebug (nocb,
+//      sysmem,nocb with sheng-fb-bgra=1, cas-turnip-debug=<options> replaces it) and NativeMetalWithhold (cas-metal-withhold=,
+//      default apple-families, "none" drops the property). The plugin itself (NativeAdrenoMetal.bundle and Turnip) arrives
+//      through the boot payload's GPU addon (sheng-gpu-addon=1) and is trusted through an owner trust module; with
+//      sheng-fb-gpu=1 the display driver offers each composited frame to the plugin in backboardd, whose GPU copies it into
+//      the scanout (GopFramebuffer NativeGOPPresenter), instead of the CPU copy. Nothing in mode 12 touches the GPU itself.
+// Mode 13 and above do not exist: cas_gpu_probe refuses them.
 //
 // GPU frequency (the hard rule: never above cas's speed bin). The GMU never picks a frequency of its own: it runs the level the
 // host votes, by index into the performance table the host sent at HFI start (Linux v6.6 a6xx_hfi.c a6xx_hfi_send_perf_table
@@ -76,11 +87,13 @@
 // CP_RB_*, CP_SCRATCH), the GMU's SPTPRAC clock control and CX busy counter (hw_init), and the five kernel buffers. Mode 10 adds
 // the PIL SMCs (TrustZone then owns 0x8681a000..0x8681bfff), CP packets and the GIC distributor's SPI 300 configuration. Mode 11
 // adds GPU page tables for each client VM (system memory), the context bank's TTBR0 (the CPU switches it with the GPU idle), CP
-// packets through ring 0, the self test's two BOs, and, only after a hang, the restart's GPU register writes (as mode 9's).
+// packets through ring 0, the self test's two BOs, and, only after a hang, the restart's GPU register writes (as mode 9's). Mode
+// 12 writes no hardware: it loads a kext and registers an IOService; the GPU work it enables is the clients' (their own VMs and
+// queue ranges, through the mode 11 driver), and with sheng-fb-gpu=1 the GPU writes the scanout memory.
 // Not ported: alioth's UCHE row and its register dump to the log (reads only), its boot-arg knobs (pipa-gpu-hwcg, -gmem16m,
 // -apriv: here hw_init always runs the table, Linux's GMEM base 0 and APRIV on; the driver's own pipa-gpu-no-update stays unset),
 // its memory benchmark, the dram_read32 hook (an uncached second mapping of a BO page, for diagnostics only), the hang, fault,
-// UCHE, submit and CP-error rows of its heartbeat (they need 119-character log rows) and metal() (mode 12).
+// UCHE, submit and CP-error rows of its heartbeat (they need 119-character log rows), and metal()'s pipa-tu canned Turnip sets.
 //
 // Banner rows (cas-banner=1: banner rows 0, 1, 2, 4, 5 and 6; at most 47 characters). Modes 1-6:
 //   0 GPU m<mode> <gcc> <cc> <smmu> <gpu> io<err> bin<n> cx<on> ck<on> s<step>
@@ -137,14 +150,31 @@
 //   4 LIVE i<GPU irqs> s<submissions>/<completed> t<timeouts> h<hangs>/<restarts> u<opened>/<closed> <uptime>s
 //     (replaces IRQ, rewritten every 2 s by the heartbeat) success after the self test, before any client: LIVE i<n> s2/2 t0
 //     h0/0 u2/2 <s>s, with the uptime growing by 2 every beat and s == completed; i grows with every fence.
+// Mode 12 runs only after the self test passed, so rows 1-3 of mode 11 give way once more (a failing PUB or ST keeps its own
+// row and mode 12 never starts); rows 0, 4 (LIVE, as above: u counts every user connection the plugin opens, s its
+// submissions) and 5 stay:
+//   1 OK <marker> PUB b<IAS>/<OAS> tm<table mode> ST <round 1> <round 2> s<steps passed>/<steps>      (replaces OK, PUB, ST)
+//     success: OK a6500c0d PUB b48/56 tm1 ST 4 4 s36/36
+//   2 METAL run                                             while metal() runs, then
+//     METAL stopped at <stage>: <IOReturn>                    stage 1 IOGPUFamily/IOAcceleratorES (e00002f0: the parent class is
+//       missing or not 136 bytes), 2 the late static initializer (preModLoad/postModLoad), 3 allocation/init, 4 attach
+//     METAL ok a<MetalPluginName readers> c<processes granted a connection> k<plugin markers> m<newest marker> f<mount failures>
+//       (rewritten every 2 s) success: a and c nonzero, m 6803 (backboardd's device returned to the discovery; 68f1 = Turnip not
+//       found, 68f2 = no device made), f0
+//   3 PRES A<addon stage>/<status> n<files>/<written>/<failed> o<offered> d<done> c<CPU copies> f<GPU fallbacks>
+//     (every 2 s) A: the extensions union mount of zzy-native-gpu-addon-mount.patch, 5/0 = mounted and the plugin visible
+//     (0/-1 = sheng-gpu-addon unset, 1/<errno> source missing, 2/<errno> mount refused, 3-4 lookups through the union failed);
+//     n: files in the payload addon (-1 none), written to Data this boot, failed (the rest were already equal).
+//     GPU presentation: o and d grow together, c stays where it was when the plugin took over; CPU presentation: o = d = 0, c grows.
 // Steps (row 0, native_gpu_step): 1-4 maps/run/fuse, 50 cmd-db, 70 clocks, 60 GMU state, 79 cold start entry, 80+n SMMU context
 // step n, 90 cold start running, 97 cold start done / 98 failed, 100 GX vote, 101 GX on, 110+n GPU SMMU context step n, 120 CP
 // buffers, 121 hw_init, 122 ring, 123 CP_ME_INIT, 124 marker, 125 marker read back, 130-134 zap (metadata, init_image, mem_setup,
 // copy, auth_and_reset), 135 secure-mode exit, 140 interrupt, 141 interrupt ok, 150 publish, 155/156 self-test round 1/2, 157
-// replay, 99 finished (in mode 11 with the device published, the thread then stays in the heartbeat).
+// replay, 160 metal(), 99 finished (in modes 11-12 with the device published, the thread then stays in the heartbeat).
 // The rows are written 5 s after the late probe, as alioth does, so the display already runs if a read hangs the bus.
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -153,6 +183,9 @@
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
+#include <libkern/c++/OSMetaClass.h>
+#include <libkern/c++/OSSymbol.h>
+#include <mach/kmod.h>
 extern "C" {
 #include "GpuPowerBoard.h"
 #include "A650Gmu.h"
@@ -208,6 +241,31 @@ void native_adreno_set_restart(NativeAdrenoRestart restart, void *cookie);
 extern volatile uint32_t native_adreno_ib_log[4][6 + 96 + 96 + 2 + 16 + 80];
 extern volatile uint32_t native_adreno_ib_log_count;
 extern volatile uint32_t native_adreno_cp_aperture[4];
+// Mode 12 (alioth f188378 GpuProbe.cpp:77-86): the staged AGXAccelerator (NativeAdrenoAccelerator.cpp @70771a7, its initializer
+// taken out of __mod_init_func by scripts/build-adreno650.py), the kext loader and the kernel's own kmod record.
+#if CAS_GPU_ACCELERATOR
+void native_adreno_accelerator_static_init(void) __asm__("__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp");
+IOService *native_adreno_accelerator_allocate(void);
+unsigned native_adreno_accelerator_instance_size(void);
+kern_return_t OSKextLoadKextWithIdentifier(const char *);
+extern kmod_info_t g_kernel_kmod_info;
+#endif
+// The METAL row: plugin markers ([0] total, [1..16] the newest sixteen by total & 15), failed connection mounts ([3]), the processes
+// that read MetalPluginName and the processes that opened the plugin type (NativeAdrenoPublish.cpp).
+extern volatile uint32_t native_adreno_metal_marks[17];
+extern volatile uint32_t native_adreno_mount_fail[4];
+struct NativeAdrenoAskerRecord {char name[20]; uint32_t reads;};
+extern struct NativeAdrenoAskerRecord native_adreno_metal_askers[12];
+struct NativeAdrenoClientRecord {char name[20]; uint32_t opens, refused, closes, slot, peak_mib, last_refusal;};
+extern struct NativeAdrenoClientRecord native_adreno_client_log[16];
+// The PRES row: the GPU addon's install and extensions mount (patches/xnu/zzy-native-gpu-addon-mount.patch, kern_exec.c), the
+// display hand-off (drivers/GopFramebuffer@33e941a NativeGOPPresenter.cpp) and the display's CPU copies and GPU fallbacks
+// (LegacyDisplayProbe.cpp).
+extern volatile int native_gpu_addon_stage, native_gpu_addon_status, native_gpu_addon_files, native_gpu_addon_written,
+    native_gpu_addon_failed;
+extern volatile uint64_t native_gop_gpu_offers, native_gop_gpu_completions;
+extern volatile uint64_t native_legacy_copy_n;
+extern volatile uint32_t native_legacy_gpu_fallbacks;
 }
 
 namespace {
@@ -1258,6 +1316,102 @@ bool selfTest() {
     return ok;
 }
 
+// Mode 12's rows (formats in the header).
+constexpr unsigned kRowMetal = 2, kRowPres = 3;
+bool gMetal, gRows12;
+// Rows 1-3 of mode 11 in one line once the device is published and the self test passed, so METAL and PRES get rows 2 and 3.
+void collapseRows() {
+    const uint32_t *p = native_gpu_publish;
+    char line[48];
+    snprintf(line, sizeof line, "OK %x PUB b%u/%u tm%u ST %d %d s%u/%u", native_gpu_cp[8], NativeAdrenoGpuContextInputBits(),
+             native_gpu_context.output_bits, native_adreno_cp_aperture[3], int32_t(p[8]), int32_t(p[9]), p[3], p[4]);
+    putRow(kRowOk, line);
+    putRow(kRowSelfTest, "");
+}
+void metalRow() {
+    unsigned askers = 0, granted = 0;
+    for (const auto &a : native_adreno_metal_askers) if (a.name[0]) ++askers;
+    for (const auto &c : native_adreno_client_log) if (c.name[0] && c.opens) ++granted;
+    const uint32_t total = native_adreno_metal_marks[0];
+    const uint32_t newest = total ? native_adreno_metal_marks[1 + ((total - 1) & 15)] : 0;
+    char line[48];
+    snprintf(line, sizeof line, "METAL ok a%u c%u k%u m%x f%u", askers, granted, total, newest, native_adreno_mount_fail[3]);
+    putRow(kRowMetal, line);
+}
+void presRow() {
+    char line[48];
+    snprintf(line, sizeof line, "PRES A%d/%d n%d/%d/%d o%llu d%llu c%llu f%u", native_gpu_addon_stage, native_gpu_addon_status,
+             native_gpu_addon_files, native_gpu_addon_written, native_gpu_addon_failed,
+             static_cast<unsigned long long>(native_gop_gpu_offers), static_cast<unsigned long long>(native_gop_gpu_completions),
+             static_cast<unsigned long long>(native_legacy_copy_n), native_legacy_gpu_fallbacks);
+    putRow(kRowPres, line);
+}
+
+// alioth's metal() (f188378 GpuProbe.cpp:1519-1607): the staged AGXAccelerator for the original Metal discovery (IOAcceleratorES ->
+// MetalPluginName -> /System/Library/Extensions/<name>.bundle, which the GPU addon's union mount supplies). Differences: the rows
+// are cas's short ones; alioth's boot-arg names pipa-turnip-debug and pipa-metal-withhold are cas-turnip-debug and
+// cas-metal-withhold (same defaults: nocb, or sysmem,nocb with sheng-fb-bgra=1, and apple-families); its pipa-tu canned sets are
+// not carried. The grant list is alioth's: its comment there (u276) found CollectionsPoster to be the wallpaper's process, and
+// backboardd is the render server, whose plugin takes the display hand-off.
+#if CAS_GPU_ACCELERATOR
+bool metal() {
+    unsigned at = 0;
+    auto stop = [&](IOReturn why) {
+        char line[48];
+        snprintf(line, sizeof line, "METAL stopped at %u: %x", at, static_cast<unsigned>(why));
+        putRow(kRowMetal, line);
+        return false;
+    };
+    stage(160);
+    putRow(kRowMetal, "METAL run");
+    at = 1;
+    const kern_return_t kext = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGPUFamily");
+    if (kext) return stop(kext);
+    const OSSymbol *name = OSSymbol::withCString("IOAcceleratorES");
+    const OSMetaClass *parent = name ? OSMetaClass::getMetaClassWithName(name) : nullptr;
+    OSSafeReleaseNULL(name);
+    if (!parent || parent->getClassSize() != 136) return stop(kIOReturnNotFound);
+    at = 2;
+    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
+    if (!handle) return stop(kIOReturnNoResources);
+    native_adreno_accelerator_static_init();
+    const IOReturn loaded = OSMetaClass::postModLoad(handle);
+    if (loaded) return stop(loaded);
+    if (native_adreno_accelerator_instance_size() != 136) return stop(kIOReturnInvalid);
+    at = 3;
+    IOService *accelerator = native_adreno_accelerator_allocate();
+    if (!accelerator) return stop(kIOReturnNoMemory);
+    if (!accelerator->init()) {accelerator->release(); return stop(kIOReturnError);}
+    accelerator->setProperty("MetalPluginName", "NativeAdrenoMetal");
+    accelerator->setProperty("NativeSandboxGrantProcess",
+        "backboardd,iconservicesagent,Preferences,CollectionsPoster,AegirPoster,KaleidoscopePoster,"
+        "PhotosPosterProvider,PosterBoard,WidgetRenderer_Default,mediaserverd,SpringBoard");
+    accelerator->setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
+    // Turnip's options (the plugin's applyBoardTurnipDebug): the A650 has no concurrent binning, so Turnip may pick GMEM or
+    // system memory per pass ("nocb" keeps the variable non-empty); sheng-fb-bgra=1 is what the plugin itself acts on.
+    char turnip[64] = "nocb";
+    unsigned fbBgra = 0;
+    if (PE_parse_boot_argn("sheng-fb-bgra", &fbBgra, sizeof fbBgra) && fbBgra) strlcpy(turnip, "sysmem,nocb", sizeof turnip);
+    PE_parse_boot_arg_str("cas-turnip-debug", turnip, sizeof turnip);
+    accelerator->setProperty("NativeTurnipDebug", turnip);
+    // The Apple GPU families withheld in every process (alioth 2026-10-24: with them reported, widget corners drew in 4 x 4 blocks).
+    char withhold[64] = "apple-families";
+    PE_parse_boot_arg_str("cas-metal-withhold", withhold, sizeof withhold);
+    if (withhold[0] && strcmp(withhold, "none")) accelerator->setProperty("NativeMetalWithhold", withhold);
+    at = 4;
+    if (!accelerator->attach(IOService::getPlatform())) {accelerator->release(); return stop(kIOReturnNotAttached);}
+    accelerator->registerService();
+    gMetal = true;
+    metalRow();
+    return true;
+}
+#else
+bool metal() {
+    putRow(kRowMetal, "METAL none: no accelerator in this archive");
+    return false;
+}
+#endif
+
 // alioth's heartbeat (:1687-1756), reduced to one 47-character row: every 2 s the GPU interrupts taken, the submissions and
 // their completed fences, timeouts, the driver's hangs and restarts (its hangcheck, every 500 ms), user clients opened and
 // closed, and the uptime in seconds, which shows the thread is alive. It never returns.
@@ -1272,6 +1426,11 @@ bool selfTest() {
         snprintf(line, sizeof line, "LIVE i%u s%u/%u t%u h%u/%u u%u/%u %llus", gIrqCount, st.submissions, st.completed, st.timeouts,
                  st.hangs, st.restarts, opened, closed, static_cast<unsigned long long>(ns / 1000000000ull));
         putRow(kRowLive, line);
+        // Only once mode 12 took rows 2 and 3 (after a passed self test); a failed PUB or ST keeps its own row.
+        if (gRows12) {
+            if (gMetal) metalRow();
+            presRow();
+        }
         IOSleep(2000);
     }
 }
@@ -1325,7 +1484,13 @@ void gpuThread(void *, wait_result_t) {
         snprintf(line, sizeof line, "OK cp%u zap%u irq%u m %x", unsigned(cp), unsigned(zap), unsigned(irq), native_gpu_cp[8]);
         putRow(kRowOk, line);
         if (publish()) {
-            selfTest();
+            // Mode 12 (alioth's gpuThread :1824) only after the self test passed (or was skipped with cas-gpu-selftest=0).
+            if (selfTest() && gMode >= 12) {
+                gRows12 = true;
+                collapseRows();
+                presRow();
+                metal();
+            }
             stage(99);
             heartbeat();   // the thread stays for the rest of the boot
         }
@@ -1336,8 +1501,8 @@ void gpuThread(void *, wait_result_t) {
 
 extern "C" void cas_gpu_probe(void) {
     unsigned mode = 0;
-    // Mode 12 and above (alioth's Metal accelerator) are not ported; mode 4 does not exist.
-    if (!PE_parse_boot_argn("cas-gpu", &mode, sizeof mode) || !mode || mode == 4 || mode > 11 || native_gpu_step) return;
+    // Mode 13 and above do not exist; neither does mode 4.
+    if (!PE_parse_boot_argn("cas-gpu", &mode, sizeof mode) || !mode || mode == 4 || mode > 12 || native_gpu_step) return;
     gMode = mode;
     native_gpu_step = 1;
     thread_t thread = nullptr;
