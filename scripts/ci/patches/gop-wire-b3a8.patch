@@ -1,0 +1,27 @@
+diff --git a/NativeGOPWire.h b/NativeGOPWire.h
+index 0ce3c04d66e647637248e4ab18edd78d122a8c46..18e117d48995fceff4770ebc212c7ea5daab3ac5 100644
+--- a/NativeGOPWire.h
++++ b/NativeGOPWire.h
+@@ -4,16 +4,19 @@
+ #include <stdint.h>
+ // Scanout format (NGPMode) and frame formats (NGPSwap.format). A half-float frame is RGBA 16F rows, converted to the scanout's BGRX by the
+ // client on the GPU: LINEAR holds linear light (encoded to sRGB on the way), ENCODED holds values already sRGB-encoded.
+-enum { NGP_BGRX8888=1,NGP_RGBA16F_LINEAR=2,NGP_RGBA16F_ENCODED=3,NGP_VERSION=1 };
++enum { NGP_BGRX8888=1,NGP_RGBA16F_LINEAR=2,NGP_RGBA16F_ENCODED=3,NGP_B3A8_XR_OPAQUE=4,NGP_VERSION=1 };
+ struct NGPMode {uint32_t version,format;uint64_t width,height,stride,bytes;};
+ struct NGPPresent {uint64_t address,bytes;uint32_t width,height,stride,format;};
+ struct NGPTransfer {uint64_t sequence,bytes;};
+ // GPU hand-off (boot-arg sheng-fb-gpu=1): the display driver offers a finished frame instead of copying it. A privileged client waits for it
+ // (selector 2: the frame's pages are mapped read/write into the caller, at address), lets the GPU copy it into the scanout mapping (client
+ // memory type 1, writable) and then completes it (selector 3), which retires the swap. Nothing here copies pixels.
+-enum { NGP_METHOD_MODE=0,NGP_METHOD_PRESENT=1,NGP_METHOD_WAIT_SWAP=2,NGP_METHOD_COMPLETE_SWAP=3,NGP_MEMORY_SCANOUT_RW=1 };
++enum { NGP_METHOD_MODE=0,NGP_METHOD_PRESENT=1,NGP_METHOD_WAIT_SWAP=2,NGP_METHOD_COMPLETE_SWAP=3,NGP_METHOD_ARM_SWAP=4,NGP_MEMORY_SCANOUT_RW=1 };
+ struct NGPWait {uint64_t timeout_ms;};
++// Format 4 stride is the alpha-plane byte pitch (colour pitch = 4*stride). bytes is the valid mapped extent, not invented page padding.
+ struct NGPSwap {uint64_t sequence,address,bytes,stride;uint32_t width,height,format,reserved;};
++// Format 4 only: prepare/encode all resources, ARM the delivered sequence, then commit. A lost reply may already be armed.
++struct NGPArm {uint64_t sequence;};
+ struct NGPComplete {uint64_t sequence;uint32_t status,reserved;};
+-static_assert(sizeof(NGPWait)==8 && sizeof(NGPSwap)==48 && sizeof(NGPComplete)==16,"GOP hand-off ABI");
++static_assert(sizeof(NGPWait)==8 && sizeof(NGPArm)==8 && sizeof(NGPSwap)==48 && sizeof(NGPComplete)==16,"GOP hand-off ABI");
+ static_assert(sizeof(NGPMode)==40 && sizeof(NGPPresent)==32 && sizeof(NGPTransfer)==16,"GOP transfer ABI");

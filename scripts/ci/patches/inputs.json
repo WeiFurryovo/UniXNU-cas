@@ -1,0 +1,66 @@
+{
+  "framework_commit": "e2fdae4312d0acc3d8a52bc457101e7918095e6a",
+  "patches": [
+    {
+      "base_commit": "6416a76e0a287d85afbcddda21192388460e155c",
+      "files": {
+        "GpuScanoutClient.h": {
+          "after_sha256": "96d429bc8b5b3e9dc025f155422a4d5c422aaf7dcd2db26c6c47e2724818b673",
+          "before_sha256": "1ac37cd05b90e1bc14be1aa28e155489f78c77dbaa2fa0d5bca9b6d1b457049c"
+        },
+        "GpuScanoutLayout.h": {
+          "after_sha256": "9a415684bfeaa25ef5565c0aff116748e482c8cdb3ec0985000429bdc5f04769",
+          "before_sha256": null
+        },
+        "GpuScanoutPresenter.h": {
+          "after_sha256": "fadda2b31a904bfd2ad7c3ccb442ed0b8eabba391c5b3b8c87ef63f740224f80",
+          "before_sha256": "ddbafdb494788350806ead7abafb6a1c7ec2712e1ccb5a4c60f74f6c4d24e3ce"
+        },
+        "README.md": {
+          "after_sha256": "903f7ade39a6490ea3504b930789544be90b5f9ba357d931c940b9eea01474a9",
+          "before_sha256": "5e0c574d060a7e9b817c6c71544d073b15cb18e9c6e0bbd38f1d9d1709f774c7"
+        },
+        "bridge/check_scanout_b3a8.py": {
+          "after_sha256": "6499d26838ccce74842fe943ddc9aeb2c5a3c085142d0c0c8d72d6149c3bfc7c",
+          "before_sha256": null
+        },
+        "bridge/present_host.mm": {
+          "after_sha256": "3115d095893662996dabcd58c6dffe39401fc07da04efdf60adf2f2aefae748d",
+          "before_sha256": "a6d66106031ff8b1ac408a3768e37beec38790300b4bcda896fad25c597f6644"
+        },
+        "bridge/scanout_client_host.mm": {
+          "after_sha256": "0544bcc9613e1e7818e22f950f7c7396ac2fcd58ac2920963c6364059ffe1a6b",
+          "before_sha256": null
+        },
+        "bridge/scanout_host.mm": {
+          "after_sha256": "0a16662d9f1886852433a44a065c8fc9292d1d96d57020ecad5386fbba7b2ec2",
+          "before_sha256": "fc4f55215495049870a45fe3e5cd235f88e1a5a704cce12e3eb369b7b33331e5"
+        },
+        "bridge/scanout_layout_host.cpp": {
+          "after_sha256": "c85007d895c3f099b580726e49081d463622b7ecea3862ff778122582c1f0cab",
+          "before_sha256": null
+        },
+        "shaders/scanout_convert.ll": {
+          "after_sha256": "53ae678e9da62eeaf3a427e8589eadb0d95f85f83ab7f4672945b5eee44042c3",
+          "before_sha256": "a7d2660ec3b3e0f88db02e1942f9b30f2df710020188d6f03d7b5cb0fb0df446"
+        }
+      },
+      "patch": "adreno-metal-b3a8.patch",
+      "repository": "drivers/AdrenoMetal",
+      "sha256": "c040b20dfe006505a1d97ee97444ac95e6500a8456687532f0298a6448d7ebb8"
+    },
+    {
+      "base_commit": "e47c1b8de169cd2bd0b885c7d85e433010e3cdf2",
+      "files": {
+        "NativeGOPWire.h": {
+          "after_sha256": "c05f5a6e3669addbf4ae46c4a9503ecd8a2cdd9f5731905a7fbf1dc3d616be15",
+          "before_sha256": "b9507abef1a2ae9fb086bcc6d571e52fba9a26df94869a56209a38d45af4aa52"
+        }
+      },
+      "patch": "gop-wire-b3a8.patch",
+      "repository": "drivers/GopFramebuffer",
+      "sha256": "fe1493bbfe3760932ebefcad382d075116b7798fc6d2d5c1415e5eaf7fc98b64"
+    }
+  ],
+  "schema_version": 1
+}

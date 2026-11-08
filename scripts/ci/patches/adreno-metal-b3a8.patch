@@ -1,0 +1,1527 @@
+diff --git a/GpuScanoutClient.h b/GpuScanoutClient.h
+index 7b259b50b81c13f4f5c99b30ae917f6d8501b0f4..15ccdf8f59f7f80a1d05d833d4ef0ca72a609e0e 100644
+--- a/GpuScanoutClient.h
++++ b/GpuScanoutClient.h
+@@ -1,9 +1,7 @@
+ // SPDX-License-Identifier: MIT
+-// Userspace side of the GPU hand-off (boot-arg sheng-fb-gpu=1): serves the display driver's frames with the GPU. For every offered frame the
+-// GPU copies the compositor's surface pages into the scanout mapping (GpuScanoutPresenter.h), and the swap is completed with the GPU's
+-// verdict. A failed copy is reported as failed; the display driver then falls back to its own path and counts it.
+-// The calls reach the kernel through a Transport. In the plugin that is the Adreno accelerator's connection (the original sandbox profiles
+-// admit that class, not the presenter's own service): methods 0x7000 + NGP_METHOD_* through the tunnel selector, scanout as memory type 0x5343.
++// Userspace side of the GPU hand-off. Format 4 needs sequence-bound ARM permission immediately before commit; uncertain submission or
++// completion stops serving without COMPLETE or CPU fallback. Merely retaining this Client cannot prove DMA safety after process exit.
++// Calls use the Adreno accelerator's tunnel: 0x7000 + NGP_METHOD_*, with writable scanout as memory type 0x5343.
+ #pragma once
+ #import <Metal/Metal.h>
+ #include <mach/mach_time.h>
+@@ -18,45 +16,50 @@ namespace gpuscanout {
+ 
+ struct Transport {
+     void *context;
+-    // NGP_METHOD_MODE / WAIT_SWAP / COMPLETE_SWAP with the wire records; returns the IOReturn (0 = success).
++    // MODE / WAIT_SWAP / COMPLETE_SWAP / ARM_SWAP with wire records; returns IOReturn (0 = success).
+     int (*call)(void *context, uint32_t method, const void *in, size_t inSize, void *out, size_t outSize);
+-    // The scanout, writable, mapped into this task.
+     int (*mapScanout)(void *context, uint64_t *address, uint64_t *length);
+-    // Progress marker (the plugin shows the latest ones on the boot page, which survives a panic that parks the calling core).
+     void (*mark)(void *context, uint32_t value);
+ };
+ 
+ struct Stats {
+     uint64_t frames, failures, timeouts;
+-    int lastResult;     // gpupresent::Result of the last frame
+-    int step;           // 0 idle, 2 mode refused, 3 scanout not mappable/importable, 4 serving
+-    int error;          // the failing call's return, when there is one
+-    uint64_t verified;  // frames whose scanout was read back and compared with the surface
+-    uint64_t mismatchRows;   // rows of those frames that differ (CPU reads only: nothing is rendered or copied by the CPU)
+-    uint32_t lastMs;    // the GPU copy's time for the last frame
+-    uint64_t totalMs;   // and for all frames (the mean is totalMs / (frames + failures))
++    int lastResult;
++    int step;           // 0 idle, 2 mode refused, 3 scanout not mappable/importable, 4 serving, 5 held
++    int error;
++    uint64_t verified;
++    uint64_t mismatchRows;
++    uint32_t lastMs;
++    uint64_t totalMs;
++    uint64_t b3a8Offered, armed, commits, completed, held, rejected; // commits counts API attempts, NOT proven submissions
++    uint64_t b3a8Verified, b3a8MismatchPixels;
+ };
+ 
+ class Client {
+ public:
+-    // Reads the mode and maps the scanout; false with stats.step telling where it stopped.
+     bool open(id<MTLDevice> device, const Transport &transport, Stats *stats) {
++        // A held client is deliberately not reusable or destroyed by this interface.
++        if (presenter_ || !stats || !transport.call || !transport.mapScanout) return false;
+         transport_ = transport;
+         stats_ = stats;
++        *stats_ = {};
+         NGPMode mode = {};
+         note(0x6710);
+         int status = transport_.call(transport_.context, NGP_METHOD_MODE, nullptr, 0, &mode, sizeof mode);
+         note(0x6711);
+-        if (status || mode.version != NGP_VERSION || mode.format != NGP_BGRX8888 || !mode.width || !mode.height ||
+-            mode.stride < mode.width * 4 || mode.bytes < mode.stride * mode.height) return fail(2, status);
+-        const size_t page = (size_t)getpagesize();
++        const uint64_t page = (uint64_t)getpagesize();
++        uint64_t targetBytes = 0;
++        if (status || mode.version != NGP_VERSION || mode.format != NGP_BGRX8888 ||
++            !gpupresent::layout::rows(mode.width, mode.height, mode.stride, 4, mode.bytes) || mode.stride > SIZE_MAX ||
++            !gpupresent::layout::round(mode.bytes, page, targetBytes) || targetBytes > SIZE_MAX) return fail(2, status);
+         uint64_t address = 0, length = 0;
+         note(0x6712);
+         status = transport_.mapScanout(transport_.context, &address, &length);
+         note(0x6713);
+-        if (status || !address || length < mode.bytes) return fail(3, status);
+-        // The mapping covers whole pages; the framebuffer allocation ends on a page boundary, the copy never writes past the last row.
+-        gpupresent::Scanout scanout = {(void *)(uintptr_t)address, (size_t)((mode.bytes + page - 1) & ~(page - 1)), (size_t)mode.stride,
++        // Rounded import is allowed ONLY when the actual map length proves coverage of the whole rounded interval.
++        if (status || address > UINTPTR_MAX || targetBytes > length ||
++            !gpupresent::layout::import((void *)(uintptr_t)address, targetBytes, page)) return fail(3, status);
++        gpupresent::Scanout scanout = {(void *)(uintptr_t)address, (size_t)targetBytes, (size_t)mode.stride,
+                                        (uint32_t)mode.width, (uint32_t)mode.height};
+         note(0x6714);
+         scanout_ = scanout;
+@@ -64,71 +67,143 @@ public:
+         note(0x6715);
+         if (!presenter_->ready()) return fail(3, 0);
+         stats_->step = 4;
++        note(0x6740); // This client understands format 4; not a claim of GPU capability or completion.
+         return true;
+     }
+-    // One wait (at most timeoutMs) and, when the display driver offered a frame, one GPU copy and its completion. Returns false on a
+-    // protocol error that makes further serving pointless.
+     bool serveOne(uint64_t timeoutMs) {
++        if (!presenter_ || !presenter_->ready() || stopped_ || presenter_->held()) return false;
+         NGPWait wait = {timeoutMs};
+         NGPSwap swap = {};
+-        if (!stats_->timeouts && !stats_->frames) note(0x6720);   // first wait
++        if (!stats_->timeouts && !stats_->frames) note(0x6720);
+         const int status = transport_.call(transport_.context, NGP_METHOD_WAIT_SWAP, &wait, sizeof wait, &swap, sizeof swap);
+         if (status) {
+             if ((unsigned)status == 0xe00002d6u /* kIOReturnTimeout */) {++stats_->timeouts; return true;}
+             ++stats_->failures;
+             stats_->error = status;
++            stopped_ = true;
+             return false;
+         }
+-        const size_t page = (size_t)getpagesize();
+-        {   // measurement: the second half of the run copies half the rows
+-            static uint64_t first = 0;
+-            const uint64_t nowS = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000000ull;
+-            if (!first) first = nowS;
+-            (void)first; gpupresent::gHalfRows.store(false, std::memory_order_relaxed);
+-        }
+-        note(0x6730);   // a frame was offered
++        const bool b3a8 = swap.format == NGP_B3A8_XR_OPAQUE;
++        if (b3a8) ++stats_->b3a8Offered;
++        gpupresent::gHalfRows.store(false, std::memory_order_relaxed);
++        note(0x6730);
+         const uint64_t offeredUs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000;
+-        if (NBWaitInFlight) NBWaitInFlight(offeredUs);
++        if (NBWaitInFlight) NBWaitInFlight(offeredUs); // This hook may be disabled; it is not submission or fence evidence.
+         const uint64_t began = mach_absolute_time();
+-        const gpupresent::Result r = presenter_->present({(const void *)(uintptr_t)swap.address, (size_t)((swap.bytes + page - 1) & ~(page - 1)),
+-                                                          (size_t)swap.stride, swap.width, swap.height, swap.reserved, swap.format});
++        ArmedFrame state = {this, swap.sequence, false, false, false};
++        const gpupresent::Submission submission = {&state, arm, event};
++        gpupresent::Result r = gpupresent::kBadFrame;
++        // Never turn a valid-byte count into invented mapped padding. Format 4's kernel wire record proves complete page coverage.
++        if (validSwap(swap))
++            r = presenter_->present({(const void *)(uintptr_t)swap.address, (size_t)swap.bytes, (size_t)swap.stride,
++                                     swap.width, swap.height, swap.reserved, swap.format}, b3a8 ? &submission : nullptr);
+         {
+             static mach_timebase_info_data_t base;
+             if (!base.denom) mach_timebase_info(&base);
+-            stats_->lastMs = (uint32_t)(((mach_absolute_time() - began) * base.numer / base.denom) / 1000000);
++            const uint64_t elapsed = mach_absolute_time() - began;
++            stats_->lastMs = (uint32_t)((elapsed / base.denom * base.numer) / 1000000);
+             stats_->totalMs += stats_->lastMs;
+         }
++        // Only an explicit pre-ARM refusal or successful GPU completion permits retirement after an ARM call.
++        if (r == gpupresent::kHeld || (state.attempted && !state.refused && (r != gpupresent::kOk || !state.armed))) {
++            stats_->lastResult = gpupresent::kHeld;
++            stats_->step = 5;
++            ++stats_->failures;
++            if (!b3a8) ++stats_->held;
++            stopped_ = true;
++            note(0x6744);
++            return false;
++        }
+         stats_->lastResult = (int)r;
++        if (b3a8 && r != gpupresent::kOk) {++stats_->rejected; note(0x6745);}
+         if (r == gpupresent::kOk && swap.format == NGP_BGRX8888 && stats_->verified < 4) verify(swap);
+-        note(0x6731);   // the GPU copy returned
++        if (r == gpupresent::kOk && b3a8 && stats_->b3a8Verified < 2) verifyB3a8(swap);
++        note(0x6731);
+         const uint64_t copiedUs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000;
+         NGPComplete done = {swap.sequence, r == gpupresent::kOk ? 0u : 0xe00002bcu /* kIOReturnError */, 0};
+         const int completed = transport_.call(transport_.context, NGP_METHOD_COMPLETE_SWAP, &done, sizeof done, nullptr, 0);
+         if (NBTraceSwap) NBTraceSwap(offeredUs, copiedUs, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000, (uint32_t)swap.sequence, (uint32_t)r);
+-        if (completed) {++stats_->failures; stats_->error = completed; return false;}
++        if (completed) {++stats_->failures; stats_->error = completed; stopped_ = true; return false;}
+         if (r == gpupresent::kOk) ++stats_->frames; else ++stats_->failures;
+         return true;
+     }
+ private:
+-    // Reads the scanout back with aligned 32-bit loads (the framebuffer is device memory; wider loads can fault) and compares the top rows with the
+-    // surface the GPU copied. The lower part of the panel is skipped: the diagnostic renderer paints there. Evidence only; nothing is written.
++    struct ArmedFrame { Client *client; uint64_t sequence; bool attempted, armed, refused; };
++    static gpupresent::ArmResult arm(void *context) {
++        ArmedFrame &state = *(ArmedFrame *)context;
++        NGPArm request = {state.sequence};
++        state.attempted = true;
++        const int result = state.client->transport_.call(state.client->transport_.context, NGP_METHOD_ARM_SWAP,
++                                                        &request, sizeof request, nullptr, 0);
++        if (result) state.client->stats_->error = result;
++        state.armed = result == 0;
++        // Busy is returned before ARM when the CPU owns scanout. Unsupported means this ARM operation never ran.
++        // BadArgument can also mean duplicate ARM; Error/Timeout can hide a lost success reply. None are safe refusals.
++        state.refused = (uint32_t)result == 0xe00002d5u /* kIOReturnBusy */ ||
++                        (uint32_t)result == 0xe00002c7u /* kIOReturnUnsupported */;
++        return state.armed ? gpupresent::kArmAllowed : state.refused ? gpupresent::kArmRefused : gpupresent::kArmUncertain;
++    }
++    static void event(void *context, unsigned value) {
++        Client &client = *(((ArmedFrame *)context)->client);
++        switch (value) {
++            case gpupresent::kArmed: ++client.stats_->armed; client.note(0x6741); break;
++            case gpupresent::kCommitAttempt: ++client.stats_->commits; client.note(0x6742); break;
++            case gpupresent::kCompleted: ++client.stats_->completed; client.note(0x6743); break;
++            case gpupresent::kHold: ++client.stats_->held; break;
++        }
++    }
++    static bool validSwap(const NGPSwap &swap) {
++        if (swap.address > UINTPTR_MAX || swap.stride > SIZE_MAX ||
++            !gpupresent::layout::import((const void *)(uintptr_t)swap.address, swap.bytes, (size_t)getpagesize())) return false;
++        switch (swap.format) {
++            case NGP_BGRX8888: return gpupresent::layout::rows(swap.width, swap.height, swap.stride, 4, swap.bytes);
++            case NGP_RGBA16F_LINEAR:
++            case NGP_RGBA16F_ENCODED:
++                return gpupresent::layout::rows(swap.width, swap.height, swap.stride, 8, swap.bytes) && gpupresent::layout::wordPitch(swap.stride);
++            case NGP_B3A8_XR_OPAQUE: return gpupresent::layout::b3a8(swap.width, swap.height, swap.stride, swap.bytes);
++            default: return false;
++        }
++    }
++    // Compare the actual path: native scanout_opaque forces alpha; a device without that pipeline uses the unchanged legacy blit.
+     void verify(const NGPSwap &swap) {
+-        const uint32_t rows = swap.height < 400 ? swap.height : 400, words = swap.width;
++        if ((scanout_.stride & 3) || (swap.stride & 3)) return;
++        const uint32_t rows = swap.height < 400 ? swap.height : 400;
++        const uint32_t opacity = presenter_->opaqueOutput() ? 0xff000000u : 0u;
+         const volatile uint32_t *shown = (const volatile uint32_t *)scanout_.base;
+         const volatile uint32_t *surface = (const volatile uint32_t *)(uintptr_t)swap.address;
+         for (uint32_t y = 0; y < rows; ++y) {
+             const volatile uint32_t *a = shown + (size_t)y * (scanout_.stride / 4), *b = surface + (size_t)y * (swap.stride / 4);
+-            for (uint32_t x = 0; x < words; ++x)
+-                if (a[x] != b[x]) {++stats_->mismatchRows; break;}
++            for (uint32_t x = 0; x < swap.width; ++x)
++                if (a[x] != (b[x] | opacity)) {++stats_->mismatchRows; break;}
+         }
+         ++stats_->verified;
+     }
++    static uint32_t xrCode(uint32_t value) {
++        if (value <= 384) return 0;
++        if (value >= 894) return 255;
++        return ((value - 384) * 255 + 255) / 510;
++    }
++    // Six aligned u32 reads per plane, only after Completed and before retiring the request. Never writes scanout or samples alpha.
++    void verifyB3a8(const NGPSwap &swap) {
++        const volatile uint32_t *shown = (const volatile uint32_t *)scanout_.base;
++        const volatile uint32_t *surface = (const volatile uint32_t *)(uintptr_t)swap.address;
++        const uint32_t xs[3] = {0, swap.width / 2, swap.width - 1};
++        const uint32_t ys[2] = {0, swap.height - 1};
++        for (uint32_t y : ys) for (uint32_t x : xs) {
++            const uint32_t source = surface[(size_t)y * (size_t)swap.stride + x];
++            const uint32_t expected = 0xff000000u | (xrCode((source >> 20) & 1023) << 16) |
++                                      (xrCode((source >> 10) & 1023) << 8) | xrCode(source & 1023);
++            if (shown[(size_t)y * (scanout_.stride / 4) + x] != expected) ++stats_->b3a8MismatchPixels;
++        }
++        ++stats_->b3a8Verified;
++    }
+     void note(uint32_t value) {if (transport_.mark) transport_.mark(transport_.context, value);}
+     bool fail(int step, int error) {stats_->step = step; stats_->error = error; return false;}
+     Transport transport_ = {};
+-    gpupresent::Presenter *presenter_ = nullptr;
++    gpupresent::Presenter *presenter_ = nullptr; // Intentionally kept alive when serving stops, including uncertain ARM and GPU status.
+     gpupresent::Scanout scanout_ = {};
+     Stats *stats_ = nullptr;
++    bool stopped_ = false;
+ };
+ 
+ }  // namespace gpuscanout
+diff --git a/GpuScanoutLayout.h b/GpuScanoutLayout.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5743670841b156a8b1c9673f22d6b5b2bd4fbd53
+--- /dev/null
++++ b/GpuScanoutLayout.h
+@@ -0,0 +1,51 @@
++// SPDX-License-Identifier: MIT
++// Checked byte extents for no-copy scanout imports. b3a8 stride is the A8 plane's pitch, not the colour pitch.
++#pragma once
++#include <stddef.h>
++#include <stdint.h>
++
++namespace gpupresent {
++namespace layout {
++
++inline bool multiply(uint64_t a, uint64_t b, uint64_t &out) {
++    if (b && a > UINT64_MAX / b) return false;
++    out = a * b;
++    return true;
++}
++inline bool add(uint64_t a, uint64_t b, uint64_t &out) {
++    if (a > UINT64_MAX - b) return false;
++    out = a + b;
++    return true;
++}
++inline bool round(uint64_t bytes, uint64_t page, uint64_t &out) {
++    uint64_t n;
++    if (!bytes || !page || (page & (page - 1)) || !add(bytes, page - 1, n)) return false;
++    out = n & ~(page - 1);
++    return true;
++}
++inline bool dimensions(uint64_t width, uint64_t height) {
++    return width && height && width <= 16384 && height <= 16384;
++}
++inline bool import(const void *base, uint64_t bytes, uint64_t page) {
++    const uintptr_t address = (uintptr_t)base;
++    return address && page && !(page & (page - 1)) && !(address & (page - 1)) &&
++           bytes && bytes <= SIZE_MAX && bytes <= UINTPTR_MAX && !(bytes & (page - 1)) &&
++           address <= UINTPTR_MAX - bytes;
++}
++inline bool rows(uint64_t width, uint64_t height, uint64_t stride, uint64_t bytesPerPixel, uint64_t bytes) {
++    uint64_t row, preceding, extent;
++    // Padding after the final visible row is not accessed by the row copy or compute paths.
++    return dimensions(width, height) && bytesPerPixel && multiply(width, bytesPerPixel, row) && stride >= row &&
++           multiply(stride, height - 1, preceding) && add(preceding, row, extent) && extent <= bytes;
++}
++inline bool b3a8(uint64_t width, uint64_t height, uint64_t stride, uint64_t bytes) {
++    uint64_t colourStride, colour, alpha, alphaBytes, extent;
++    return dimensions(width, height) && stride >= width && stride <= UINT32_MAX &&
++           multiply(stride, 4, colourStride) && multiply(colourStride, height, colour) &&
++           round(colour, 4096, alpha) && multiply(stride, height, alphaBytes) &&
++           add(alpha, alphaBytes, extent) && extent <= bytes;
++}
++inline bool wordPitch(uint64_t stride) { return !(stride & 3) && stride / 4 <= UINT32_MAX; }
++
++} // namespace layout
++} // namespace gpupresent
+diff --git a/GpuScanoutPresenter.h b/GpuScanoutPresenter.h
+index 8c64a98f17b038a09a24f2aec78c9404ca2bd071..053594ebb8f10033d1095040ad3d4533b247905d 100644
+--- a/GpuScanoutPresenter.h
++++ b/GpuScanoutPresenter.h
+@@ -1,12 +1,8 @@
+ // SPDX-License-Identifier: MIT
+-// GPU presentation: the GPU copies a finished BGRA frame (the compositor's IOSurface pages) into the firmware scanout memory. Both are
+-// imported without a copy (newBufferWithBytesNoCopy: pinned by the kernel and mapped into the GPU's 4 KiB context), the copy is a blit on
+-// the GPU's queue, and the call returns after the GPU retired it. A half-float frame (RGBA 16F, what iPadOS 27's render server draws
+-// once a Metal device renders) is converted by a compute kernel (shaders/scanout_convert.ll) through the display driver's own table of
+-// codes (NativeHalfCodes.h), so the bytes match its CPU path. A BGRA frame goes through the kernel scanout_opaque, which copies it with
+-// alpha 0xff, as the half-float conversion stores it: the display blends the scanout by its per-pixel alpha (SSPP SRC_FORMAT 0x237ff),
+-// and the compositor's framebuffer alpha is not opacity (translucent tinted blocks around Liquid Glass, i23c80d087); a device without
+-// the kernel blits it. No CPU touches a pixel; there is no staging copy and no software fallback here. Used through the public Metal API, on any device (the native frontend on the tablet, the Mac's device for the host check).
++// No-copy GPU presentation into the firmware scanout. Half-float and b3a8 frames use independent compute kernels; native BGRA uses
++// scanout_opaque (alpha 0xff), while a device without that kernel retains the legacy blit baseline. No CPU renders or copies pixels.
++// A format-4 submission is armed only after every import and encoding succeeded. Unknown completion holds all resources and prevents
++// further presentation. These userspace references do not prove DMA quiescence on process exit; the kernel must also keep its request.
+ #pragma once
+ #import <Metal/Metal.h>
+ #include <unistd.h>
+@@ -15,55 +11,66 @@
+ #include <atomic>
+ #include "../GopFramebuffer/NativeGOPWire.h"
+ #include "../GopFramebuffer/NativeHalfCodes.h"
++#include "GpuScanoutLayout.h"
+ 
+-// The conversion kernel's AIR and the frontend's loader for bare AIR (both in the plugin; weak, so a device without them only blits).
+ extern "C" const void *nmb_scanout_convert_air(size_t *length) __attribute__((weak_import));
+ extern "C" id native_bridge_metal_library_with_air(const void *bytes, size_t length) __attribute__((weak_import));
+ 
+ namespace gpupresent {
+ 
+-// Measurement only: when set, the copy covers the upper half of the rows (the GPU cost of the copy is what is being measured).
+ inline std::atomic<bool> gHalfRows{false};
+ 
+ struct Scanout {
+-    void *base;       // writable mapping of the firmware framebuffer (page aligned)
+-    size_t bytes;     // whole extent, a multiple of the page size
++    void *base;       // writable, page-aligned mapping of the firmware framebuffer
++    size_t bytes;     // proven mapped extent, a multiple of the page size
+     size_t stride;    // bytes per row
+     uint32_t width, height;
+ };
+ 
+ struct Frame {
+     const void *base; // page-aligned mapping of the surface pages
+-    size_t bytes;     // allocation size, a multiple of the page size
+-    size_t stride;
++    size_t bytes;     // proven mapped extent, a multiple of the page size
++    size_t stride;    // bytes per row, except b3a8: A8 plane byte pitch (colour pitch = 4 * stride)
+     uint32_t width, height;
+-    uint32_t mapping; // the kernel's id for this mapping of the surface (0: none, imported for this frame only)
+-    uint32_t format;  // NGP_BGRX8888, NGP_RGBA16F_LINEAR or NGP_RGBA16F_ENCODED
++    uint32_t mapping; // kernel mapping id; zero imports this frame only
++    uint32_t format;
+ };
+ 
+-enum Result { kOk = 0, kBadFrame, kBadScanout, kNoResource, kGpuFailed };
++enum Result { kOk = 0, kBadFrame, kBadScanout, kNoResource, kGpuFailed, kHeld };
++enum SubmissionEvent { kArmed = 1, kCommitAttempt, kCompleted, kHold };
++enum ArmResult { kArmAllowed, kArmRefused, kArmUncertain };
++struct Submission {
++    void *context;
++    ArmResult (*arm)(void *context);
++    void (*event)(void *context, unsigned event);
++};
+ 
+ class Presenter {
+ public:
+     Presenter(id<MTLDevice> device, const Scanout &scanout) : device_(device), scanout_(scanout) {
++        if (!validScanout()) return;
+         queue_ = [device newCommandQueue];
+-        if (!validScanout() || !queue_) return;
++        if (!queue_) return;
+         target_ = [device newBufferWithBytesNoCopy:scanout.base length:scanout.bytes options:MTLResourceStorageModeShared deallocator:nil];
+     }
+     bool ready() const { return target_ != nil; }
+-    // One frame: encodes the GPU copy, commits, waits for the GPU. Rows are copied as whole rows of width*4 bytes.
+-    Result present(const Frame &frame) {
++    bool held() const { return held_; }
++    bool opaqueOutput() const { return opaqueOutput_; }
++    // A null Submission is for standalone host tests, which have no kernel request to arm. The live client always supplies one for b3a8.
++    Result present(const Frame &frame, const Submission *submission = nullptr) {
++        if (held_) return kHeld;
+         if (!ready()) return kBadScanout;
++        opaqueOutput_ = false;
++        if (frame.format == NGP_B3A8_XR_OPAQUE) return b3a8(frame, submission);
+         if (frame.format == NGP_RGBA16F_LINEAR || frame.format == NGP_RGBA16F_ENCODED) return convert(frame);
+-        if (frame.format != NGP_BGRX8888) return kBadFrame;
+-        const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
+-        if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
+-            frame.width != scanout_.width || frame.height != scanout_.height || frame.stride < row ||
+-            (size_t)frame.height > frame.bytes / frame.stride || frame.stride * (frame.height - 1) + row > frame.bytes) return kBadFrame;
+-        const uint32_t rows = gHalfRows.load(std::memory_order_relaxed) ? frame.height / 2 : frame.height;
++        if (frame.format != NGP_BGRX8888 || !validFrame(frame) ||
++            !layout::rows(frame.width, frame.height, frame.stride, 4, frame.bytes)) return kBadFrame;
++        const size_t row = (size_t)frame.width * 4;
++        const uint32_t rows = frame.height > 1 && gHalfRows.load(std::memory_order_relaxed) ? frame.height / 2 : frame.height;
+         id<MTLBuffer> source = sourceFor(frame);
+         if (!source) return kNoResource;
+-        if (!(frame.stride & 3) && !(scanout_.stride & 3) && pipeline(opaque_, opaqueFailed_, @"scanout_opaque")) {
++        if (layout::wordPitch(frame.stride) && layout::wordPitch(scanout_.stride) && pipeline(opaque_, opaqueFailed_, @"scanout_opaque")) {
++            opaqueOutput_ = true;
+             id<MTLCommandBuffer> commands = [queue_ commandBuffer];
+             id<MTLComputeCommandEncoder> encoder = commands ? [commands computeCommandEncoder] : nil;
+             if (!encoder) return kNoResource;
+@@ -74,44 +81,43 @@ public:
+             [encoder setBytes:params length:sizeof params atIndex:3];
+             [encoder dispatchThreadgroups:MTLSizeMake((frame.width + 15) / 16, (rows + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
+             [encoder endEncoding];
+-            [commands commit];
+-            [commands waitUntilCompleted];
+-            return commands.status == MTLCommandBufferStatusCompleted ? kOk : kGpuFailed;
++            return finish(commands, source, nullptr);
+         }
+         id<MTLCommandBuffer> commands = [queue_ commandBuffer];
+         id<MTLBlitCommandEncoder> blit = commands ? [commands blitCommandEncoder] : nil;
+         if (!blit) return kNoResource;
+         if (frame.stride == scanout_.stride) {
+-            // Equal pitch: the rows are one contiguous run.
+             [blit copyFromBuffer:source sourceOffset:0 toBuffer:target_ destinationOffset:0 size:frame.stride * (rows - 1) + row];
+         } else {
+-            // A linear texture over the surface pages reads them with the surface's pitch and writes the scanout's pitch.
+-            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:frame.width
+-                                                                                       height:frame.height mipmapped:NO];
+-            d.storageMode = MTLStorageModeShared;
+-            d.usage = MTLTextureUsageShaderRead;
+-            if (frame.stride % [device_ minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm]) {
++            uint64_t sourceSpan = 0, targetSpan = 0;
++            const NSUInteger alignment = [device_ minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
++            // A valid final row need not include its padding. In that case use bounded row copies rather than a full linear texture.
++            if (!alignment || frame.stride % alignment || !layout::multiply(frame.stride, frame.height, sourceSpan) ||
++                sourceSpan > frame.bytes || !layout::multiply(scanout_.stride, frame.height, targetSpan) ||
++                targetSpan > scanout_.bytes) {
+                 for (uint32_t y = 0; y < rows; ++y)
+-                    [blit copyFromBuffer:source sourceOffset:y * frame.stride toBuffer:target_ destinationOffset:y * scanout_.stride size:row];
++                    [blit copyFromBuffer:source sourceOffset:(size_t)y * frame.stride toBuffer:target_ destinationOffset:(size_t)y * scanout_.stride size:row];
+             } else {
++                MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:frame.width
++                                                                                           height:frame.height mipmapped:NO];
++                d.storageMode = MTLStorageModeShared;
++                d.usage = MTLTextureUsageShaderRead;
+                 id<MTLTexture> texture = [source newTextureWithDescriptor:d offset:0 bytesPerRow:frame.stride];
+                 if (!texture) {[blit endEncoding]; return kNoResource;}
+                 [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                            sourceSize:MTLSizeMake(frame.width, rows, 1) toBuffer:target_ destinationOffset:0
+-                    destinationBytesPerRow:scanout_.stride destinationBytesPerImage:scanout_.stride * frame.height];
++                    destinationBytesPerRow:scanout_.stride destinationBytesPerImage:(size_t)targetSpan];
+             }
+         }
+         [blit endEncoding];
+-        [commands commit];
+-        [commands waitUntilCompleted];
+-        return commands.status == MTLCommandBufferStatusCompleted ? kOk : kGpuFailed;
++        return finish(commands, source, nullptr);
+     }
+-    // A half-float frame: one thread per pixel, 16 x 8 threads a group (the kernel skips threads past the edges).
+     Result convert(const Frame &frame) {
+-        const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 8;
+-        if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
+-            frame.width != scanout_.width || frame.height != scanout_.height || frame.stride < row || (frame.stride & 3) ||
+-            (scanout_.stride & 3) || frame.stride * (frame.height - 1) + row > frame.bytes) return kBadFrame;
++        if (held_) return kHeld;
++        if (!ready()) return kBadScanout;
++        if ((frame.format != NGP_RGBA16F_LINEAR && frame.format != NGP_RGBA16F_ENCODED) || !validFrame(frame) ||
++            !layout::rows(frame.width, frame.height, frame.stride, 8, frame.bytes) ||
++            !layout::wordPitch(frame.stride) || !layout::wordPitch(scanout_.stride)) return kBadFrame;
+         const bool encoded = frame.format == NGP_RGBA16F_ENCODED;
+         if (!pipeline(convert_, convertFailed_, @"scanout_convert") || !table(encoded)) return kNoResource;
+         id<MTLBuffer> source = sourceFor(frame);
+@@ -125,15 +131,10 @@ public:
+         [encoder setBuffer:target_ offset:0 atIndex:1];
+         [encoder setBuffer:tables_[encoded] offset:0 atIndex:2];
+         [encoder setBytes:params length:sizeof params atIndex:3];
+-        [encoder dispatchThreadgroups:MTLSizeMake((frame.width + 15) / 16, (frame.height + 7) / 8, 1)
+-                threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
++        [encoder dispatchThreadgroups:MTLSizeMake((frame.width + 15) / 16, (frame.height + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
+         [encoder endEncoding];
+-        [commands commit];
+-        [commands waitUntilCompleted];
+-        return commands.status == MTLCommandBufferStatusCompleted ? kOk : kGpuFailed;
++        return finish(commands, source, nullptr);
+     }
+-    // A kernel of the scanout library, made once; a failure is not retried (every later half-float frame then goes back to the display
+-    // driver's own path, every BGRA frame to the blit).
+     bool pipeline(__strong id<MTLComputePipelineState> &state, bool &failed, NSString *name) {
+         if (state || failed) return state != nil;
+         failed = true;
+@@ -148,20 +149,65 @@ public:
+         failed = state == nil;
+         return state != nil;
+     }
+-    // The 8-bit code of every 16-bit half pattern, as 32-bit words (65536 of them, 256 KiB).
+     id<MTLBuffer> table(bool encoded) {
+         if (tables_[encoded]) return tables_[encoded];
+         id<MTLBuffer> buffer = [device_ newBufferWithLength:65536 * sizeof(uint32_t) options:MTLResourceStorageModeShared];
+-        if (!buffer) return nil;
++        if (!buffer || !buffer.contents) return nil;
+         uint32_t *codes = (uint32_t *)buffer.contents;
+         for (uint32_t bits = 0; bits < 65536; ++bits) codes[bits] = native_half::code((uint16_t)bits, encoded);
+         tables_[encoded] = buffer;
+         return buffer;
+     }
+ private:
+-    // The compositor cycles through a few surfaces and the kernel keeps each one's mapping under one id, so the GPU import (pinning and
+-    // mapping the pages, milliseconds per frame otherwise) is made once per surface. The kernel keeps more mappings (6) than kSources, so
+-    // every import cached here still has its mapping.
++    Result b3a8(const Frame &frame, const Submission *submission) {
++        if (!validFrame(frame) || !layout::b3a8(frame.width, frame.height, frame.stride, frame.bytes) ||
++            !layout::wordPitch(scanout_.stride) || (submission && !submission->arm)) return kBadFrame;
++        if (!pipeline(b3a8_, b3a8Failed_, @"scanout_b3a8")) return kNoResource;
++        id<MTLBuffer> source = sourceFor(frame);
++        if (!source) return kNoResource;
++        id<MTLCommandBuffer> commands = [queue_ commandBuffer];
++        id<MTLComputeCommandEncoder> encoder = commands ? [commands computeCommandEncoder] : nil;
++        if (!encoder) return kNoResource;
++        // b3a8 stride is already the number of uint32 colour pixels per row, NOT the colour byte pitch.
++        const uint32_t params[4] = {frame.width, frame.height, (uint32_t)frame.stride, (uint32_t)(scanout_.stride / 4)};
++        [encoder setComputePipelineState:b3a8_];
++        [encoder setBuffer:source offset:0 atIndex:0];
++        [encoder setBuffer:target_ offset:0 atIndex:1];
++        [encoder setBytes:params length:sizeof params atIndex:3];
++        [encoder dispatchThreadgroups:MTLSizeMake((frame.width + 15) / 16, (frame.height + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
++        [encoder endEncoding];
++        return finish(commands, source, submission);
++    }
++    static void event(const Submission *submission, unsigned value) {
++        if (submission && submission->event) submission->event(submission->context, value);
++    }
++    Result finish(id<MTLCommandBuffer> commands, id<MTLBuffer> source, const Submission *submission) {
++        // Retain before asking permission: a lost ARM reply cannot establish that the kernel is still unarmed.
++        heldSource_ = source;
++        heldTarget_ = target_;
++        heldCommands_ = commands;
++        held_ = true;
++        if (submission && submission->arm) {
++            const ArmResult permission = submission->arm(submission->context);
++            if (permission == kArmRefused) {releaseCompleted(); return kNoResource;}
++            if (permission != kArmAllowed) {event(submission, kHold); return kHeld;}
++            event(submission, kArmed);
++        }
++        event(submission, kCommitAttempt); // An API attempt, not a queue-submitted or hardware-fence counter.
++        [commands commit];
++        [commands waitUntilCompleted];
++        if (commands.status != MTLCommandBufferStatusCompleted) {event(submission, kHold); return kHeld;}
++        event(submission, kCompleted);
++        releaseCompleted();
++        return kOk;
++    }
++    // Called only when commit is proven never attempted, or the command has reported Completed.
++    void releaseCompleted() {
++        held_ = false;
++        heldCommands_ = nil;
++        heldSource_ = nil;
++        heldTarget_ = nil;
++    }
+     static constexpr unsigned kSources = 4;
+     struct Source { uint32_t mapping; const void *base; size_t bytes; uint64_t used; id<MTLBuffer> buffer; };
+     id<MTLBuffer> sourceFor(const Frame &frame) {
+@@ -177,21 +223,26 @@ private:
+         if (buffer) sources_[victim] = {frame.mapping, frame.base, frame.bytes, ++uses_, buffer};
+         return buffer;
+     }
++    bool validFrame(const Frame &frame) const {
++        return layout::import(frame.base, frame.bytes, (size_t)getpagesize()) &&
++               frame.width == scanout_.width && frame.height == scanout_.height && layout::dimensions(frame.width, frame.height);
++    }
+     bool validScanout() const {
+-        const size_t page = (size_t)getpagesize();
+-        return scanout_.base && !((uintptr_t)scanout_.base & (page - 1)) && scanout_.bytes && !(scanout_.bytes & (page - 1)) &&
+-               scanout_.width && scanout_.height && scanout_.stride >= (size_t)scanout_.width * 4 &&
+-               scanout_.stride * scanout_.height <= scanout_.bytes;
++        return layout::import(scanout_.base, scanout_.bytes, (size_t)getpagesize()) &&
++               layout::rows(scanout_.width, scanout_.height, scanout_.stride, 4, scanout_.bytes);
+     }
+     id<MTLDevice> device_;
+     Scanout scanout_;
+     id<MTLCommandQueue> queue_;
+     id<MTLBuffer> target_;
+-    id<MTLComputePipelineState> convert_ = nil, opaque_ = nil;
+-    bool convertFailed_ = false, opaqueFailed_ = false;
++    id<MTLComputePipelineState> convert_ = nil, opaque_ = nil, b3a8_ = nil;
++    bool convertFailed_ = false, opaqueFailed_ = false, b3a8Failed_ = false;
+     id<MTLBuffer> tables_[2] = {nil, nil};
+     Source sources_[kSources] = {};
+     uint64_t uses_ = 0;
++    bool held_ = false, opaqueOutput_ = false;
++    __strong id<MTLBuffer> heldSource_ = nil, heldTarget_ = nil;
++    __strong id<MTLCommandBuffer> heldCommands_ = nil;
+ };
+ 
+ }  // namespace gpupresent
+diff --git a/README.md b/README.md
+index 6879bd825ea3d005af6228c9fdde0193c65af0dd..c4d25681eb26de58d587c838d26968e55cb46c80 100644
+--- a/README.md
++++ b/README.md
+@@ -12,6 +12,21 @@ Build and interface details: [documentation](https://unixnu.com/drivers/adreno-m
+ 
+ Unused owned image backing can serve later pooled or dedicated images. Extra image spares share a 256 MiB device budget and expire after ten seconds. Plain unused backing of at least 256 KiB can be released by the existing room worker, with at most 128 MiB queued. Allocation failure reclaims queued backing before retrying. Imported memory and owner callbacks retain their release ordering.
+ 
++## GPU scanout conversion
++
++`shaders/scanout_convert.ll` retains separate half-float (`scanout_convert`) and opaque BGRA (`scanout_opaque`) kernels and adds `scanout_b3a8` for `NGP_B3A8_XR_OPAQUE` (format 4). Its buffers are source 0, destination 1 and 16-byte parameters 3: width, height, source pitch in words, destination pitch in words. For format 4 only, `Frame.stride` is the alpha plane's **byte** stride, which is also the colour plane's pitch in 32-bit words; do not divide it by four. Plane 0 holds XRGB2101010 with R at bit 20, G at bit 10 and B at bit 0. The kernel clips each code to `[384,894]`, rounds XR to eight bits, and stores opaque BGRX without gamma, a lookup table or alpha-plane reads. Import validation still requires the complete two-plane extent, including alpha at `align_up(4 * stride * height, 4096)`.
++
++The Linux regression executes the actual new IR function after adapting its target and address spaces, verifies the complete AIR with `llvm-as` and `opt`, and runs O0, O2 and ASan/UBSan checks. It covers all 1024 codes per channel, boundary colour combinations, partial workgroups, inaccessible alpha pages, poisoned padding, output canaries and the 1080×2340 / stride-1088 layout. Run from this repository:
++
++```sh
++python3 bridge/check_scanout_b3a8.py
++python3 bridge/check_scanout_b3a8.py --reference-header /path/to/NativeLegacyRequest.h
++```
++
++The optional header is the consuming display driver's existing CPU reference and is included only at test compile time; the test does not copy it into this repository. Without it the test uses an independent rational XR oracle and says so. ASan instruments the adapted IR's memory accesses; UBSan applies to the C harness and optional C reference, not retroactively to LLVM arithmetic. These are CPU executions of shader IR, not GPU qualification.
++
++The existing resolved-tree `python3 scripts/check-native-metal-frontend-host.py` builds and runs `bridge/scanout_host.mm` through the real frontend, translator and host Vulkan device. Its b3a8 cases retain the half-float and BGRA checks, vary alpha independently, check every output pixel and padding, and present twice to reuse each compiled pipeline. Cold/warm persistent shader-cache runs remain separate invocations of that host check. `bridge/present_host.mm` expects opaque alpha on the native compute path but preserves original alpha for the `NMB_SYSTEM_DEVICE=1` blit baseline. A missing host GPU is not a pixel-test pass, and neither host test establishes Adreno hardware completion or scanout correctness.
++
+ ## Frame diagnostics
+ 
+ With `sheng-gpu-trace=1` the render server writes its frame trace (command phases, encoding batches, memory decisions, completion stages, attachments and Turnip pass and submission records) to its own file. Only event 63, the render, encode and completion thread identities, reaches the kernel ring. See [GPU frame diagnostics](https://unixnu.com/porting/gpu-diagnostics) for fields and decoding.
+diff --git a/bridge/check_scanout_b3a8.py b/bridge/check_scanout_b3a8.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7a4cefc83a38d7938dd3dcd0f08238a1af21510
+--- /dev/null
++++ b/bridge/check_scanout_b3a8.py
+@@ -0,0 +1,293 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: MIT
++"""Execute the actual scanout_b3a8 AIR body on Linux, not a C rewrite.
++
++Only the target, address spaces and test instrumentation are adapted. A scalar
++IR wrapper supplies the uint2 gid without depending on the host C vector ABI.
++--reference-header additionally compares against native_legacy_copy_b3a8 from
++the caller's NativeLegacyRequest.h; that header is never copied into this tree.
++"""
++import argparse
++import hashlib
++from pathlib import Path
++import re
++import shlex
++import shutil
++import subprocess
++import tempfile
++
++
++HARNESS = r'''
++#define _GNU_SOURCE
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#if __has_feature(address_sanitizer)
++#include <sanitizer/asan_interface.h>
++#define POISON(p, n) __asan_poison_memory_region((p), (n))
++#define UNPOISON(p, n) __asan_unpoison_memory_region((p), (n))
++#else
++#define POISON(p, n) ((void)0)
++#define UNPOISON(p, n) ((void)0)
++#endif
++#ifdef REFERENCE_HEADER
++#include REFERENCE_HEADER
++#endif
++
++extern void scanout_b3a8_host(const void *, void *, const void *, uint32_t, uint32_t);
++struct params {uint32_t width, height, sourceWords, destinationWords;};
++_Static_assert(sizeof(struct params) == 16, "scanout parameter ABI");
++
++static void require(int ok, const char *what) {
++    if (!ok) {fprintf(stderr, "FAIL: %s\n", what); exit(1);}
++}
++static size_t round_up(size_t n, size_t align) {return (n + align - 1) & ~(align - 1);}
++static uint32_t random_word(uint32_t *state) {
++    *state ^= *state << 13; *state ^= *state >> 17; *state ^= *state << 5;
++    return *state;
++}
++// Independent rational XR oracle; the code under test remains the LLVM function.
++static uint32_t xr(uint32_t code) {
++    if (code <= 384) return 0;
++    if (code >= 894) return 255;
++    return ((code - 384) * 255 + 255) / 510;
++}
++static uint32_t expected_pixel(uint32_t v) {
++    return 0xff000000u | xr((v >> 20) & 1023) << 16 | xr((v >> 10) & 1023) << 8 | xr(v & 1023);
++}
++static uint32_t pack(uint32_t r, uint32_t g, uint32_t b, uint32_t extra) {
++    return (r << 20) | (g << 10) | b | (extra << 30);
++}
++static uint32_t source_pixel(size_t index, unsigned kind, uint32_t *state) {
++    static const uint32_t edge[] = {0, 1, 382, 383, 384, 385, 386, 387, 892, 893, 894, 895, 896, 1022, 1023};
++    const uint32_t noise = random_word(state);
++    if (kind == 1) {
++        uint32_t code = (uint32_t)index & 1023;
++        switch (index / 1024) {
++        case 0: return pack(code, 384, 384, noise & 3);
++        case 1: return pack(384, code, 384, noise & 3);
++        case 2: return pack(384, 384, code, noise & 3);
++        default: return pack(code, code, code, noise & 3);
++        }
++    }
++    if (kind == 2) {
++        const size_t n = sizeof(edge) / sizeof(edge[0]);
++        return pack(edge[index % n], edge[(index / n) % n], edge[(index / (n * n)) % n], noise & 3);
++    }
++    if (kind == 3) return pack((uint32_t)index & 1023, ((uint32_t)index * 37 + 385) & 1023,
++                              ((uint32_t)index * 199 + 893) & 1023, noise & 3);
++    return noise;
++}
++struct guarded {uint8_t *mapping, *data; size_t bytes, total;};
++static struct guarded allocate(size_t bytes, size_t page) {
++    struct guarded b = {0};
++    b.bytes = round_up(bytes, page); b.total = b.bytes + 2 * page;
++    b.mapping = mmap(NULL, b.total, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    require(b.mapping != MAP_FAILED, "guarded mmap");
++    b.data = b.mapping + page;
++    require(mprotect(b.data, b.bytes, PROT_READ | PROT_WRITE) == 0, "guarded mprotect");
++    return b;
++}
++static void release(struct guarded b) {require(munmap(b.mapping, b.total) == 0, "munmap");}
++
++static void no_access(void) {
++    _Alignas(16) struct params p = {17, 11, UINT32_MAX, UINT32_MAX};
++    // Null pixel buffers prove all out-of-bounds lanes return before a source load or destination store.
++    const uint32_t lanes[][2] = {{17, 0}, {0, 11}, {17, 11}, {UINT32_MAX, 0}, {0, UINT32_MAX},
++                                 {UINT32_MAX, UINT32_MAX}, {31, 15}};
++    for (size_t i = 0; i < sizeof(lanes) / sizeof(lanes[0]); ++i)
++        scanout_b3a8_host(NULL, NULL, &p, lanes[i][0], lanes[i][1]);
++    p.width = 0; scanout_b3a8_host(NULL, NULL, &p, 0, 0);
++    p.width = 1; p.height = 0; scanout_b3a8_host(NULL, NULL, &p, 0, 0);
++    p.width = 0; scanout_b3a8_host(NULL, NULL, &p, UINT32_MAX, UINT32_MAX);
++    puts("ok out-of-bounds and empty dispatch: null pixel buffers untouched");
++}
++
++static void run_case(uint32_t w, uint32_t h, uint32_t ss, uint32_t ds, unsigned kind, const char *name) {
++    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
++    require(page && !(page & (page - 1)), "host page size");
++    const size_t colour = (size_t)ss * 4 * h, alphaBase = round_up(colour, 4096);
++    const size_t sourceBytes = alphaBase + (size_t)ss * h, destinationBytes = (size_t)ds * 4 * h;
++    struct guarded src = allocate(sourceBytes, page), dst = allocate(destinationBytes, page);
++    uint8_t *saved = malloc(src.bytes), *reference = malloc(dst.bytes);
++    require(saved && reference, "reference allocation");
++    uint32_t seed = 0x8b3a8u;
++    memset(src.data, 0x6b, src.bytes);
++    for (uint32_t y = 0; y < h; ++y) {
++        uint32_t *row = (uint32_t *)(src.data + (size_t)y * ss * 4);
++        for (uint32_t x = 0; x < w; ++x) row[x] = source_pixel((size_t)y * w + x, kind, &seed);
++    }
++    _Alignas(16) struct params p = {w, h, ss, ds};
++    const uint32_t dispatchWidth = (w + 15) & ~15u, dispatchHeight = (h + 7) & ~7u;
++    for (unsigned iteration = 0; iteration < 2; ++iteration) {
++        // Change every alpha independently between identical colour frames, including all 256 byte values.
++        for (size_t i = alphaBase; i < sourceBytes; ++i)
++            src.data[i] = (uint8_t)(iteration ? random_word(&seed) : i);
++        memcpy(saved, src.data, src.bytes);
++        memset(dst.data, 0xa5, dst.bytes); memset(reference, 0xa5, dst.bytes);
++#ifdef REFERENCE_HEADER
++        require(native_legacy_copy_b3a8(reference, destinationBytes, (uint64_t)ds * 4, src.data,
++                    sourceBytes, ss, w, h, 0, 0, 0, 0, NULL), "original CPU reference accepts layout");
++#else
++        for (uint32_t y = 0; y < h; ++y) {
++            const uint32_t *in = (const uint32_t *)(src.data + (size_t)y * ss * 4);
++            uint32_t *out = (uint32_t *)(reference + (size_t)y * ds * 4);
++            for (uint32_t x = 0; x < w; ++x) out[x] = expected_pixel(in[x]);
++        }
++#endif
++        // Padding and all alpha bytes are poisoned in ASan builds. The alpha pages are also inaccessible
++        // in unsanitized builds; guard pages cover both ends of both imported allocations.
++        for (uint32_t y = 0; y < h; ++y) {
++            POISON(src.data + ((size_t)y * ss + w) * 4, (size_t)(ss - w) * 4);
++            POISON(dst.data + ((size_t)y * ds + w) * 4, (size_t)(ds - w) * 4);
++        }
++        POISON(src.data + colour, src.bytes - colour);
++        POISON(dst.data + destinationBytes, dst.bytes - destinationBytes);
++        const size_t protectedStart = round_up(alphaBase, page);
++        if (protectedStart < src.bytes)
++            require(mprotect(src.data + protectedStart, src.bytes - protectedStart, PROT_NONE) == 0, "protect alpha");
++        for (uint32_t y = 0; y < dispatchHeight; ++y)
++            for (uint32_t x = 0; x < dispatchWidth; ++x) scanout_b3a8_host(src.data, dst.data, &p, x, y);
++        if (protectedStart < src.bytes)
++            require(mprotect(src.data + protectedStart, src.bytes - protectedStart, PROT_READ | PROT_WRITE) == 0, "restore alpha");
++        UNPOISON(src.data, src.bytes); UNPOISON(dst.data, dst.bytes);
++        require(memcmp(src.data, saved, src.bytes) == 0, "source pixels, padding and alpha unchanged");
++        for (uint32_t y = 0; y < h; ++y) {
++            const uint32_t *in = (const uint32_t *)(src.data + (size_t)y * ss * 4);
++            const uint32_t *out = (const uint32_t *)(dst.data + (size_t)y * ds * 4);
++            const uint32_t *want = (const uint32_t *)(reference + (size_t)y * ds * 4);
++            for (uint32_t x = 0; x < w; ++x) {
++                if (out[x] != want[x] || out[x] != expected_pixel(in[x]) || (out[x] >> 24) != 255) {
++                    fprintf(stderr, "FAIL %s (%u,%u) src=%08x actual=%08x reference=%08x\n",
++                            name, x, y, in[x], out[x], want[x]); exit(1);
++                }
++            }
++        }
++        require(memcmp(dst.data, reference, dst.bytes) == 0, "destination pixels, row padding and tail canary");
++    }
++    printf("ok %s: %ux%u sourceWords=%u destinationWords=%u extent=%zu alpha variations=2\n",
++           name, w, h, ss, ds, sourceBytes);
++    free(reference); free(saved); release(dst); release(src);
++}
++int main(void) {
++    no_access();
++    run_case(1, 1, 1, 1, 0, "single pixel");
++    run_case(1024, 4, 1032, 1033, 1, "all 1024 codes in each channel and grey");
++    run_case(225, 15, 233, 237, 2, "all 3375 edge-code RGB combinations");
++    run_case(257, 17, 263, 269, 3, "mixed channel ramp and high X bits");
++    run_case(17, 11, 23, 25, 0, "partial 16x8 workgroups and odd padded pitches");
++    run_case(31, 9, 31, 31, 0, "tight rows and workgroup tail");
++    run_case(1080, 2340, 1088, 1088, 0, "cas full frame");
++#ifdef REFERENCE_HEADER
++    puts("PASS: actual scanout_b3a8 IR equals original NativeLegacyRequest.h and rational XR oracle; alpha never read");
++#else
++    puts("PASS: actual scanout_b3a8 IR equals rational XR oracle; alpha never read (original CPU header not supplied)");
++#endif
++    return 0;
++}
++'''
++
++WRAPPER = r'''
++define void @scanout_b3a8_host(ptr %src, ptr %dst, ptr %p, i32 %x, i32 %y) {
++  %gx = insertelement <2 x i32> poison, i32 %x, i32 0
++  %gid = insertelement <2 x i32> %gx, i32 %y, i32 1
++  call void @scanout_b3a8(ptr %src, ptr %dst, ptr %p, <2 x i32> %gid)
++  ret void
++}
++'''
++
++
++def run(command, **kwargs):
++    print('+ ' + shlex.join(str(arg) for arg in command), flush=True)
++    return subprocess.run(command, check=True, **kwargs)
++
++
++def check_metadata(source):
++    nodes = dict(re.findall(r'^!(\d+) = (.+)$', source, re.MULTILINE))
++    kernels = re.search(r'^!air.kernel = !\{([^}]+)\}$', source, re.MULTILINE)
++    if not kernels:
++        raise SystemExit('missing AIR kernel registry')
++    entries = [nodes[n] for n in re.findall(r'!(\d+)', kernels[1])]
++    entry = [e for e in entries if 'ptr @scanout_b3a8,' in e]
++    if len(entry) != 1:
++        raise SystemExit('scanout_b3a8 must have one independent AIR registration')
++    ids = re.findall(r'!(\d+)', entry[0])
++    args = [nodes[n] for n in re.findall(r'!(\d+)', nodes[ids[-1]])]
++    bindings = [(0, 0, 1, 'src'), (1, 1, 1, 'dst'), (2, 3, 2, 'p')]
++    if len(args) != 4:
++        raise SystemExit('scanout_b3a8 must have three buffers and one uint2 gid')
++    for arg, (index, binding, address_space, name) in zip(args, bindings):
++        required = [f'!{{i32 {index}, !"air.buffer"', f'!"air.location_index", i32 {binding}, i32 1',
++                    f'!"air.address_space", i32 {address_space}', f'!"air.arg_name", !"{name}"']
++        if any(part not in arg for part in required):
++            raise SystemExit(f'invalid b3a8 argument metadata: {arg}')
++    if '!"air.buffer_size", i32 16' not in args[2] or '!"air.arg_type_align_size", i32 16' not in args[2]:
++        raise SystemExit('scanout_b3a8 params must retain the 16-byte ABI')
++    if not all(part in args[3] for part in ['!{i32 3, !"air.thread_position_in_grid"', '!"uint2"']):
++        raise SystemExit('scanout_b3a8 requires uint2 thread_position_in_grid')
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--reference-header', type=Path, help='existing NativeLegacyRequest.h; never copied into the public test')
++    parser.add_argument('--clang', default=shutil.which('clang'))
++    parser.add_argument('--llvm-as', default=shutil.which('llvm-as'))
++    parser.add_argument('--opt', default=shutil.which('opt'))
++    args = parser.parse_args()
++    if not all([args.clang, args.llvm_as, args.opt]):
++        parser.error('clang, llvm-as and opt are required')
++    if args.reference_header and not args.reference_header.is_file():
++        parser.error('--reference-header must name an existing header')
++    shader = Path(__file__).resolve().parents[1] / 'shaders/scanout_convert.ll'
++    source = shader.read_text()
++    check_metadata(source)
++    function = re.search(r'^define void @scanout_b3a8\([^\n]+\) local_unnamed_addr #(\d+) \{\n.*?^\}', source, re.MULTILINE | re.DOTALL)
++    if not function:
++        raise SystemExit('missing actual scanout_b3a8 function')
++    attributes = re.search(r'^attributes #' + function[1] + r' = \{([^}]+)\}', source, re.MULTILINE)
++    if not attributes:
++        raise SystemExit('missing kernel attributes')
++    # Preserve every instruction, predicate and constant from the actual kernel.
++    host_function = re.sub(r' addrspace\([12]\)', '', function[0])
++    print('shader SHA256 ' + hashlib.sha256(shader.read_bytes()).hexdigest(), flush=True)
++    reference_flags = []
++    if args.reference_header:
++        header = args.reference_header.resolve()
++        print('reference SHA256 ' + hashlib.sha256(header.read_bytes()).hexdigest(), flush=True)
++        reference_flags = [f'-DREFERENCE_HEADER="{header}"']
++    for tool in [args.clang, args.llvm_as, args.opt]:
++        version = subprocess.check_output([tool, '--version'], text=True)
++        print(version.splitlines()[0], flush=True)
++    with tempfile.TemporaryDirectory(prefix='scanout-b3a8-') as temporary:
++        out = Path(temporary)
++        # Verify the complete original AIR module, including its metadata and all old kernels.
++        run([args.llvm_as, shader, '-o', out / 'scanout.air'])
++        # Upstream LLVM has no AIR backend; override only the target while verifying the original module.
++        triple = subprocess.check_output([args.clang, '-dumpmachine'], text=True).strip()
++        run([args.opt, '-mtriple=' + triple, '-passes=verify', '-disable-output', out / 'scanout.air'])
++        target_ir = subprocess.check_output([args.clang, '-S', '-emit-llvm', '-x', 'c', '-', '-o', '-'], input='', text=True)
++        target = '\n'.join(line for line in target_ir.splitlines() if line.startswith('target '))
++        harness = out / 'check.c'
++        harness.write_text(HARNESS)
++        for mode, flags in [('O0', ['-O0']), ('O2', ['-O2']),
++                            ('asan-ubsan', ['-O1', '-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer'])]:
++            # ASan marks are test instrumentation, not a replacement of the AIR algorithm.
++            extra = ' sanitize_address' if mode == 'asan-ubsan' else ''
++            host = out / (mode + '.ll')
++            host.write_text(target + '\n' + host_function + '\n' + WRAPPER + '\nattributes #' + function[1] +
++                            ' = {' + attributes[1] + extra + '}\n')
++            run([args.llvm_as, host, '-o', out / (mode + '.bc')])
++            run([args.opt, '-passes=verify', '-disable-output', out / (mode + '.bc')])
++            obj = out / (mode + '.o')
++            run([args.clang, *flags, '-c', host, '-o', obj])
++            executable = out / mode
++            run([args.clang, '-std=c11', '-Wall', '-Wextra', '-Werror', *flags, *reference_flags, harness, obj, '-o', executable])
++            run([executable])
++        print('PASS: complete AIR verifies; actual kernel passes O0, O2 and ASan/UBSan host runs', flush=True)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/bridge/present_host.mm b/bridge/present_host.mm
+index aa2cc0603dbf27cc77f4a120a17518240262cf99..6a608d29d5e0c3444d3764c47ae9e52dd197840b 100644
+--- a/bridge/present_host.mm
++++ b/bridge/present_host.mm
+@@ -17,8 +17,8 @@ static void *pages(size_t bytes) {
+ }
+ static size_t roundUp(size_t n) {const size_t page = (size_t)getpagesize(); return (n + page - 1) & ~(page - 1);}
+ 
+-// One frame at a given surface pitch and scanout pitch; every pixel of the scanout must equal the surface's pixel, padding must stay untouched.
+-static bool run(id<MTLDevice> device, uint32_t w, uint32_t h, size_t srcStride, size_t dstStride, uint32_t seed, const char *name) {
++// Native compute makes alpha opaque; the system-device blit baseline preserves the source alpha. Both preserve row padding.
++static bool run(id<MTLDevice> device, bool systemDevice, uint32_t w, uint32_t h, size_t srcStride, size_t dstStride, uint32_t seed, const char *name) {
+     const size_t srcBytes = roundUp(srcStride * h), dstBytes = roundUp(dstStride * h);
+     uint8_t *src = (uint8_t *)pages(srcBytes), *dst = (uint8_t *)pages(dstBytes);
+     if (!src || !dst) {std::printf("FAIL %s pages\n", name); return false;}
+@@ -29,7 +29,11 @@ static bool run(id<MTLDevice> device, uint32_t w, uint32_t h, size_t srcStride,
+     const gpupresent::Result r = presenter.present({src, srcBytes, srcStride, w, h, 0, NGP_BGRX8888});
+     if (r != gpupresent::kOk) {std::printf("FAIL %s present %d\n", name, (int)r); return false;}
+     for (uint32_t y = 0; y < h; ++y) {
+-        if (memcmp(dst + y * dstStride, src + y * srcStride, (size_t)w * 4)) {std::printf("FAIL %s row %u differs\n", name, y); return false;}
++        const uint32_t *in = (const uint32_t *)(src + y * srcStride), *out = (const uint32_t *)(dst + y * dstStride);
++        for (uint32_t x = 0; x < w; ++x) {
++            const uint32_t want = systemDevice ? in[x] : (in[x] | 0xff000000u);
++            if (out[x] != want) {std::printf("FAIL %s (%u,%u): %08x want %08x\n", name, x, y, out[x], want); return false;}
++        }
+         for (size_t x = (size_t)w * 4; x < dstStride; ++x)
+             if (dst[y * dstStride + x] != 0xa5) {std::printf("FAIL %s row %u padding written at %zu\n", name, y, x); return false;}
+     }
+@@ -41,13 +45,14 @@ static bool run(id<MTLDevice> device, uint32_t w, uint32_t h, size_t srcStride,
+ int main(int argc, char **argv) {
+     @autoreleasepool {
+         if (argc < 3) return 2;
+-        id<MTLDevice> device = getenv("NMB_SYSTEM_DEVICE") ? MTLCreateSystemDefaultDevice() : native_bridge_metal_open(argv[1], argv[2], 0x6e6d62, nullptr);
++        const bool systemDevice = getenv("NMB_SYSTEM_DEVICE") != nullptr;
++        id<MTLDevice> device = systemDevice ? MTLCreateSystemDefaultDevice() : native_bridge_metal_open(argv[1], argv[2], 0x6e6d62, nullptr);
+         if (!device) {std::printf("FAIL device\n"); return 1;}
+         bool ok = true;
+-        ok &= run(device, 256, 64, 256 * 4, 256 * 4, 1, "equal pitch");
+-        ok &= run(device, 250, 61, 250 * 4 + 8, 256 * 4, 2, "surface pitch smaller");
+-        ok &= run(device, 250, 61, 256 * 4, 250 * 4 + 40, 3, "scanout pitch smaller");
+-        ok &= run(device, 254, 33, 254 * 4 + 8, 254 * 4 + 64, 4, "unaligned pitches");
++        ok &= run(device, systemDevice, 256, 64, 256 * 4, 256 * 4, 1, "equal pitch");
++        ok &= run(device, systemDevice, 250, 61, 250 * 4 + 8, 256 * 4, 2, "surface pitch smaller");
++        ok &= run(device, systemDevice, 250, 61, 256 * 4, 250 * 4 + 40, 3, "scanout pitch smaller");
++        ok &= run(device, systemDevice, 254, 33, 254 * 4 + 8, 254 * 4 + 64, 4, "unaligned pitches");
+         if (!ok) return 1;
+         std::printf("PASS: the GPU copied every pixel of four frames into the scanout pages, padding untouched\n");
+     }
+diff --git a/bridge/scanout_client_host.mm b/bridge/scanout_client_host.mm
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6d7c9827094a085c37f6bb9decec784a62ecabb
+--- /dev/null
++++ b/bridge/scanout_client_host.mm
+@@ -0,0 +1,271 @@
++// SPDX-License-Identifier: MIT
++// Runs the REAL Client and Presenter against instrumented Objective-C Metal stand-ins. No GPU/pixel correctness claim.
++// clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror -framework Foundation -framework Metal scanout_client_host.mm -o scanout-client-host
++#import <Foundation/Foundation.h>
++#import <Metal/Metal.h>
++#include <sys/mman.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <initializer_list>
++#include "../GpuScanoutClient.h"
++
++static unsigned checks;
++static void check(bool value, const char *name) {
++    ++checks;
++    if (!value) {std::fprintf(stderr, "FAIL: %s\n", name); std::exit(1);}
++}
++
++struct MockState {
++    unsigned imports = 0, commits = 0, waits = 0, encodings = 0;
++    unsigned failImport = 0;
++    bool failEncoder = false;
++    MTLCommandBufferStatus result = MTLCommandBufferStatusCompleted;
++    uint32_t params[4] = {};
++    __weak id target = nil, source = nil, commands = nil;
++};
++static MockState *active;
++
++@interface ScanoutMockBuffer : NSObject
++@property(nonatomic, readonly) void *contents;
++@property(nonatomic, readonly) NSUInteger length;
++- (instancetype)initWithBytes:(void *)bytes length:(NSUInteger)length;
++@end
++@implementation ScanoutMockBuffer
++- (instancetype)initWithBytes:(void *)bytes length:(NSUInteger)length {
++    if ((self = [super init])) {_contents = bytes; _length = length;}
++    return self;
++}
++@end
++
++@interface ScanoutMockPipeline : NSObject
++@property(nonatomic, readonly) NSUInteger maxTotalThreadsPerThreadgroup;
++@end
++@implementation ScanoutMockPipeline
++- (NSUInteger)maxTotalThreadsPerThreadgroup {return 128;}
++@end
++
++@interface ScanoutMockLibrary : NSObject
++- (id)newFunctionWithName:(NSString *)name;
++@end
++@implementation ScanoutMockLibrary
++- (id)newFunctionWithName:(NSString *)name {(void)name; return [NSObject new];}
++@end
++
++extern "C" const void *nmb_scanout_convert_air(size_t *length) {
++    static const uint32_t sentinel = 0;
++    *length = sizeof sentinel;
++    return &sentinel;
++}
++extern "C" id native_bridge_metal_library_with_air(const void *bytes, size_t length) {
++    (void)bytes; (void)length;
++    return [ScanoutMockLibrary new];
++}
++
++@interface ScanoutMockEncoder : NSObject
++- (void)setComputePipelineState:(id)state;
++- (void)setBuffer:(id)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index;
++- (void)setBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index;
++- (void)dispatchThreadgroups:(MTLSize)groups threadsPerThreadgroup:(MTLSize)threads;
++- (void)endEncoding;
++@end
++@implementation ScanoutMockEncoder
++- (void)setComputePipelineState:(id)state {(void)state;}
++- (void)setBuffer:(id)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {(void)buffer; (void)offset; (void)index;}
++- (void)setBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
++    check(length == sizeof active->params && index == 3, "16-byte parameter ABI");
++    std::memcpy(active->params, bytes, length);
++}
++- (void)dispatchThreadgroups:(MTLSize)groups threadsPerThreadgroup:(MTLSize)threads {
++    check(groups.width && groups.height && threads.width == 16 && threads.height == 8, "bounded dispatch geometry");
++}
++- (void)endEncoding {++active->encodings;}
++@end
++
++@interface ScanoutMockCommands : NSObject
++@property(nonatomic, readonly) MTLCommandBufferStatus status;
++- (id)computeCommandEncoder;
++- (void)commit;
++- (void)waitUntilCompleted;
++@end
++@implementation ScanoutMockCommands
++- (id)computeCommandEncoder {return active->failEncoder ? nil : [ScanoutMockEncoder new];}
++- (void)commit {
++    ++active->commits;
++    check(active->source != nil && active->target != nil && active->commands != nil, "imports and commands live at commit");
++}
++- (void)waitUntilCompleted {++active->waits;}
++- (MTLCommandBufferStatus)status {return active->result;}
++@end
++
++@interface ScanoutMockQueue : NSObject
++- (id)commandBuffer;
++@end
++@implementation ScanoutMockQueue
++- (id)commandBuffer {
++    ScanoutMockCommands *commands = [ScanoutMockCommands new];
++    active->commands = commands;
++    return commands;
++}
++@end
++
++@interface ScanoutMockDevice : NSObject
++- (id)newCommandQueue;
++- (id)newBufferWithBytesNoCopy:(void *)bytes length:(NSUInteger)length options:(MTLResourceOptions)options
++                 deallocator:(void (^)(void *, NSUInteger))deallocator;
++- (id)newComputePipelineStateWithFunction:(id)function error:(NSError **)error;
++@end
++@implementation ScanoutMockDevice
++- (id)newCommandQueue {return [ScanoutMockQueue new];}
++- (id)newBufferWithBytesNoCopy:(void *)bytes length:(NSUInteger)length options:(MTLResourceOptions)options
++                 deallocator:(void (^)(void *, NSUInteger))deallocator {
++    (void)options; (void)deallocator;
++    ++active->imports;
++    if (active->imports == active->failImport) return nil;
++    ScanoutMockBuffer *buffer = [[ScanoutMockBuffer alloc] initWithBytes:bytes length:length];
++    if (active->imports == 1) active->target = buffer; else active->source = buffer;
++    return buffer;
++}
++- (id)newComputePipelineStateWithFunction:(id)function error:(NSError **)error {
++    (void)function; (void)error;
++    return [ScanoutMockPipeline new];
++}
++@end
++
++struct Harness {
++    MockState metal;
++    gpuscanout::Client client;
++    gpuscanout::Stats stats = {};
++    NGPMode mode = {NGP_VERSION, NGP_BGRX8888, 4, 2, 16, 32};
++    NGPSwap swap = {};
++    void *target = nullptr, *source = nullptr;
++    size_t targetBytes = 0, sourceBytes = 0;
++    uint64_t mappedBytes = 0;
++    unsigned armCalls = 0, completeCalls = 0, waitCalls = 0;
++    uint32_t completionStatus = 0;
++    int armResult = 0;
++    bool opened = false;
++    explicit Harness(bool mapShort = false) {
++        active = &metal;
++        const size_t page = (size_t)getpagesize();
++        targetBytes = page; sourceBytes = page * 2;
++        target = mmap(nullptr, targetBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
++        source = mmap(nullptr, sourceBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
++        check(target != MAP_FAILED && source != MAP_FAILED, "allocate stand-in pages");
++        swap = {42, (uint64_t)(uintptr_t)source, sourceBytes, 4, 4, 2, NGP_B3A8_XR_OPAQUE, 0};
++        mappedBytes = mapShort ? mode.bytes : targetBytes;
++        opened = client.open((id<MTLDevice>)[ScanoutMockDevice new], {this, call, map, nullptr}, &stats);
++    }
++    // Held cases keep backing too: the test never unmaps memory while asserting the real Presenter's references are still live.
++    static int call(void *context, uint32_t method, const void *input, size_t inSize, void *output, size_t outSize) {
++        Harness &h = *(Harness *)context;
++        switch (method) {
++            case NGP_METHOD_MODE:
++                check(!input && !inSize && outSize == sizeof h.mode, "mode wire ABI");
++                std::memcpy(output, &h.mode, sizeof h.mode); return 0;
++            case NGP_METHOD_WAIT_SWAP:
++                ++h.waitCalls;
++                check(inSize == sizeof(NGPWait) && outSize == sizeof h.swap, "wait wire ABI");
++                std::memcpy(output, &h.swap, sizeof h.swap); return 0;
++            case NGP_METHOD_ARM_SWAP:
++                ++h.armCalls;
++                check(inSize == sizeof(NGPArm) && !output && !outSize, "ARM wire ABI");
++                check(((const NGPArm *)input)->sequence == h.swap.sequence, "ARM sequence binding");
++                check(h.metal.encodings == 1 && !h.metal.commits, "ARM after encoding before commit");
++                check(h.metal.source != nil && h.metal.target != nil && h.metal.commands != nil, "all resources retained before ARM");
++                return h.armResult;
++            case NGP_METHOD_COMPLETE_SWAP:
++                ++h.completeCalls;
++                check(inSize == sizeof(NGPComplete), "completion ABI");
++                check(((const NGPComplete *)input)->sequence == h.swap.sequence, "completion sequence");
++                h.completionStatus = ((const NGPComplete *)input)->status;
++                if (!h.completionStatus && h.swap.format == NGP_B3A8_XR_OPAQUE)
++                    check(h.armCalls == 1 && !h.armResult && h.metal.result == MTLCommandBufferStatusCompleted, "success requires ARM and Completed");
++                return 0;
++            default: check(false, "unexpected method"); return -1;
++        }
++    }
++    static int map(void *context, uint64_t *address, uint64_t *length) {
++        Harness &h = *(Harness *)context;
++        *address = (uint64_t)(uintptr_t)h.target; *length = h.mappedBytes; return 0;
++    }
++};
++
++static void heldCase(int armResult, MTLCommandBufferStatus result, const char *name) {
++    Harness h;
++    check(h.opened, "open held-case client");
++    h.armResult = armResult; h.metal.result = result;
++    @autoreleasepool {check(!h.client.serveOne(1), "uncertain state stops serving");}
++    check(h.armCalls == 1 && !h.completeCalls, "held never calls COMPLETE");
++    check(h.metal.commits == (armResult ? 0u : 1u), "ARM rejection never commits");
++    check(h.metal.source != nil && h.metal.target != nil && h.metal.commands != nil, "held owns imports and command after pool drain");
++    check(h.stats.held == 1 && !h.stats.completed && !h.stats.rejected && h.stats.lastResult == gpupresent::kHeld, "held counters are distinct");
++    h.swap.format = NGP_BGRX8888;
++    check(!h.client.serveOne(1) && h.waitCalls == 1 && !h.completeCalls, "held refuses later legacy frame without waiting");
++    std::printf("ok %s\n", name);
++}
++
++int main() {
++    @autoreleasepool {
++        {
++            Harness h(true);
++            check(!h.opened && h.stats.step == 3 && !h.metal.imports, "short scanout map rejected before import");
++        }
++        for (uint32_t refusal : {0xe00002c7u /* Unsupported */, 0xe00002d5u /* Busy */}) {
++            Harness h;
++            check(h.opened, "open explicitly refused ARM client");
++            h.armResult = (int)refusal;
++            @autoreleasepool {check(h.client.serveOne(1), "known unarmed rejection safely retires");}
++            check(h.armCalls == 1 && !h.metal.commits && h.completeCalls == 1 && h.completionStatus, "known ARM refusal never commits and sends error COMPLETE");
++            check(h.stats.rejected == 1 && !h.stats.held && !h.stats.armed && !h.stats.completed, "known ARM refusal counters");
++            check(h.metal.source == nil && h.metal.commands == nil, "known unarmed rejection releases temporary resources");
++        }
++        heldCase((int)0xe00002bcu, MTLCommandBufferStatusCompleted, "unknown ARM error: no commit or COMPLETE");
++        heldCase((int)0xe00002c2u, MTLCommandBufferStatusCompleted, "ambiguous duplicate ARM: no commit or COMPLETE");
++        heldCase((int)0xe00002d6u, MTLCommandBufferStatusCompleted, "lost ARM reply: retain without commit or COMPLETE");
++        heldCase(0, MTLCommandBufferStatusError, "post-ARM Error holds resources");
++        heldCase(0, MTLCommandBufferStatusCommitted, "post-ARM nonterminal status holds resources");
++        {
++            Harness h;
++            check(h.opened, "open successful client");
++            // Match the known all-zero XR source's black opaque output; this mock does not implement or validate the shader.
++            uint32_t *pixels = (uint32_t *)h.target;
++            for (unsigned i = 0; i < 8; ++i) pixels[i] = 0xff000000u;
++            @autoreleasepool {check(h.client.serveOne(1), "Completed retires successfully");}
++            check(h.armCalls == 1 && h.completeCalls == 1 && !h.completionStatus, "completed sends exactly one success");
++            check(h.stats.b3a8Offered == 1 && h.stats.armed == 1 && h.stats.commits == 1 && h.stats.completed == 1 &&
++                  !h.stats.held && !h.stats.rejected && h.stats.frames == 1, "format-4 success counters");
++            check(h.metal.params[2] == h.swap.stride && h.metal.params[3] == h.mode.stride / 4, "b3a8 sourceWords is alpha byte pitch");
++            check(h.stats.b3a8Verified == 1 && !h.stats.b3a8MismatchPixels, "completed-only small XR readback");
++            check(h.metal.source == nil && h.metal.commands == nil, "mapping-zero completion releases per-frame imports");
++        }
++        for (unsigned failure = 0; failure < 4; ++failure) {
++            Harness h;
++            check(h.opened, "open pre-ARM reject client");
++            if (failure == 0) h.swap.format = 0xffffffffu;
++            if (failure == 1) h.swap.bytes = 4096; // Colour fits, complete two-plane format does not.
++            if (failure == 2) h.metal.failImport = 2;
++            if (failure == 3) h.metal.failEncoder = true;
++            @autoreleasepool {check(h.client.serveOne(1), "pre-ARM rejection safely continues");}
++            check(!h.armCalls && !h.metal.commits && h.completeCalls == 1 && h.completionStatus, "pre-ARM failure returns nonzero COMPLETE");
++            check(!h.stats.held && !h.stats.armed && !h.stats.completed && h.stats.failures == 1, "rejected is not held or completed");
++            check(h.metal.source == nil && h.metal.commands == nil, "pre-ARM temporary resources released");
++        }
++        // Presenter itself also rejects every later format, independently of Client's stop gate.
++        {
++            MockState state; active = &state; state.result = MTLCommandBufferStatusError;
++            const size_t page = (size_t)getpagesize();
++            void *target = mmap(nullptr, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
++            void *source = mmap(nullptr, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
++            check(target != MAP_FAILED && source != MAP_FAILED, "direct presenter pages");
++            auto *presenter = new gpupresent::Presenter((id<MTLDevice>)[ScanoutMockDevice new], {target, page, 16, 4, 2});
++            gpupresent::Frame frame = {source, page * 2, 4, 4, 2, 0, NGP_B3A8_XR_OPAQUE};
++            @autoreleasepool {check(presenter->present(frame) == gpupresent::kHeld, "standalone host unknown completion holds");}
++            frame.format = NGP_BGRX8888; frame.stride = 16;
++            check(presenter->present(frame) == gpupresent::kHeld && state.commits == 1 && state.imports == 2, "Presenter held gate precedes every format dispatch");
++            check(state.source != nil && state.target != nil && state.commands != nil, "direct presenter keeps resources");
++        }
++        std::printf("PASS: %u real Client/Presenter protocol and lifetime assertions (mock Metal; no GPU pixels)\n", checks);
++    }
++    return 0;
++}
+diff --git a/bridge/scanout_host.mm b/bridge/scanout_host.mm
+index 69703b5f16317abbb81530df42f00925651d5d05..e471faee50b305b9039220fd19295574a25e7b83 100644
+--- a/bridge/scanout_host.mm
++++ b/bridge/scanout_host.mm
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ // Host check of the GPU scanout (GpuScanoutPresenter.h): a half-float frame converted by the compute kernel stores exactly the bytes of the
+ // display driver's table (NativeHalfCodes.h), for linear and encoded frames, with padded rows on both sides; a BGRA frame is copied with
+-// its alpha opaque.
++// its alpha opaque. The b3a8 XR kernel checks all channel codes, edge combinations and the cas frame layout without using plane-1 alpha.
+ #import <Foundation/Foundation.h>
+ #import <Metal/Metal.h>
+ #include <cstdio>
+@@ -19,6 +19,80 @@ static void *pages(size_t bytes) {
+     return posix_memalign(&p, (size_t)getpagesize(), bytes) ? nullptr : p;
+ }
+ 
++static uint32_t xr(uint32_t code) {
++    if (code <= 384) return 0;
++    if (code >= 894) return 255;
++    return ((code - 384) * 255 + 255) / 510;
++}
++
++// The independent rational reference is deliberately not the shader's shift implementation.
++static uint32_t b3a8Pixel(size_t i, unsigned kind) {
++    static const uint32_t edge[] = {0, 1, 382, 383, 384, 385, 386, 387, 892, 893, 894, 895, 896, 1022, 1023};
++    uint32_t r, g, b;
++    if (kind == 1) {
++        const uint32_t code = (uint32_t)i & 1023;
++        r = i / 1024 == 0 || i / 1024 == 3 ? code : 384;
++        g = i / 1024 == 1 || i / 1024 == 3 ? code : 384;
++        b = i / 1024 == 2 || i / 1024 == 3 ? code : 384;
++    } else if (kind == 2) {
++        const size_t n = sizeof edge / sizeof edge[0];
++        r = edge[i % n]; g = edge[(i / n) % n]; b = edge[(i / (n * n)) % n];
++    } else {
++        r = (uint32_t)random() & 1023; g = (uint32_t)random() & 1023; b = (uint32_t)random() & 1023;
++    }
++    return r << 20 | g << 10 | b | ((uint32_t)i & 3) << 30;
++}
++
++static bool b3a8(id<MTLDevice> device, uint32_t width, uint32_t height, size_t alphaStride, unsigned kind, const char *name) {
++    const size_t page = (size_t)getpagesize(), outStride = (size_t)width * 4 + 96;
++    const size_t colourBytes = alphaStride * 4 * height, alphaBase = (colourBytes + 4095) & ~(size_t)4095;
++    const size_t extent = alphaBase + alphaStride * height, inBytes = (extent + page - 1) & ~(page - 1);
++    const size_t outBytes = (outStride * height + page - 1) & ~(page - 1);
++    uint8_t *in = (uint8_t *)pages(inBytes), *out = (uint8_t *)pages(outBytes), *saved = (uint8_t *)malloc(inBytes);
++    if (!in || !out || !saved) {free(in); free(out); free(saved); std::printf("FAIL b3a8 %s allocation\n", name); return false;}
++    memset(in, 0x6b, inBytes);
++    for (uint32_t y = 0; y < height; ++y) {
++        uint32_t *row = (uint32_t *)(in + (size_t)y * alphaStride * 4);
++        for (uint32_t x = 0; x < width; ++x) row[x] = b3a8Pixel((size_t)y * width + x, kind);
++    }
++    uint64_t wrong = 0;
++    bool completed = true;
++    @autoreleasepool {
++        gpupresent::Presenter presenter(device, {out, outBytes, outStride, width, height});
++        if (!presenter.ready()) {std::printf("FAIL b3a8 %s presenter\n", name); completed = false;}
++        for (unsigned iteration = 0; completed && iteration < 2; ++iteration) {
++            // Same colour, independent alpha values; second frame reuses the compiled compute pipeline.
++            for (size_t i = alphaBase; i < extent; ++i) in[i] = (uint8_t)(iteration ? random() : i);
++            memcpy(saved, in, inBytes); memset(out, 0x5a, outBytes);
++            // Format 4's Frame.stride is the alpha byte stride, also the plane-0 pitch in uint32 words.
++            const gpupresent::Result result = presenter.present({in, inBytes, alphaStride, width, height, 0, NGP_B3A8_XR_OPAQUE});
++            if (result != gpupresent::kOk) {
++                std::printf("FAIL b3a8 %s iteration %u result %d\n", name, iteration, (int)result); completed = false; break;
++            }
++            for (uint32_t y = 0; y < height; ++y) {
++                const uint32_t *src = (const uint32_t *)(in + (size_t)y * alphaStride * 4);
++                const uint32_t *dst = (const uint32_t *)(out + (size_t)y * outStride);
++                for (uint32_t x = 0; x < width; ++x) {
++                    const uint32_t word = src[x];
++                    const uint32_t want = 0xff000000u | xr((word >> 20) & 1023) << 16 | xr((word >> 10) & 1023) << 8 | xr(word & 1023);
++                    if (dst[x] != want && wrong++ < 4)
++                        std::printf("  b3a8 %s (%u,%u): %08x want %08x\n", name, x, y, dst[x], want);
++                }
++                for (size_t b = (size_t)width * 4; b < outStride; ++b)
++                    if (out[(size_t)y * outStride + b] != 0x5a && wrong++ < 4) std::printf("  b3a8 row padding written\n");
++            }
++            for (size_t b = outStride * height; b < outBytes; ++b)
++                if (out[b] != 0x5a && wrong++ < 4) std::printf("  b3a8 tail canary written\n");
++            if (memcmp(in, saved, inBytes)) {std::printf("  b3a8 source or alpha modified\n"); ++wrong;}
++        }
++    }
++    // A failed submission is not proof the device stopped using these imported pages.
++    if (completed) {free(in); free(out); free(saved);}
++    if (!completed || wrong) {std::printf("FAIL b3a8 %s: %llu wrong\n", name, (unsigned long long)wrong); return false;}
++    std::printf("ok b3a8 %s %ux%u alpha stride %zu extent %zu (two alpha patterns)\n", name, width, height, alphaStride, extent);
++    return true;
++}
++
+ int main(int argc, char **argv) {
+     @autoreleasepool {
+         if (argc < 3) return 2;
+@@ -71,8 +145,12 @@ int main(int argc, char **argv) {
+         }
+         if (bgraWrong) {std::printf("FAIL BGRA copy: %llu wrong\n", (unsigned long long)bgraWrong); ++failed;}
+         if (presenter.present({in, inBytes, inStride, width, height, 0, 77}) != gpupresent::kBadFrame) {std::printf("FAIL unknown format taken\n"); ++failed;}
++        if (!b3a8(device, 1024, 4, 1032, 1, "all channel codes")) ++failed;
++        if (!b3a8(device, 225, 15, 233, 2, "edge combinations")) ++failed;
++        if (!b3a8(device, 17, 11, 23, 0, "partial workgroups")) ++failed;
++        if (!b3a8(device, 1080, 2340, 1088, 0, "cas frame")) ++failed;
+         if (failed) return 1;
+-        std::printf("PASS: half-float frames convert to the display driver's bytes on the GPU (linear and encoded), BGRA copies opaque, unknown formats refused\n");
++        std::printf("PASS: GPU half-float linear/encoded, opaque BGRA and b3a8 XR pixels match references; padding preserved, unknown formats refused\n");
+     }
+     return 0;
+ }
+diff --git a/bridge/scanout_layout_host.cpp b/bridge/scanout_layout_host.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..db17b992c61124278d2416b1a29543abe8986637
+--- /dev/null
++++ b/bridge/scanout_layout_host.cpp
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: MIT
++// Pure layout checks: no Metal SDK, driver or device is involved.
++#include <cstdio>
++#include <cstdint>
++#include <cstdlib>
++#include <initializer_list>
++#include "../GpuScanoutLayout.h"
++
++static unsigned checks;
++static void check(bool value, const char *name) {
++    ++checks;
++    if (!value) {std::fprintf(stderr, "FAIL: %s\n", name); std::exit(1);}
++}
++
++int main() {
++    namespace layout = gpupresent::layout;
++    uint64_t value = 0;
++    check(layout::multiply(0, UINT64_MAX, value) && value == 0, "multiply zero");
++    check(layout::multiply(UINT64_MAX, 1, value) && value == UINT64_MAX, "multiply maximum");
++    check(!layout::multiply(UINT64_MAX, 2, value), "multiply overflow");
++    check(layout::add(UINT64_MAX - 1, 1, value) && value == UINT64_MAX, "add maximum");
++    check(!layout::add(UINT64_MAX, 1, value), "add overflow");
++    check(!layout::round(0, 4096, value), "zero import");
++    check(!layout::round(4096, 0, value), "zero page");
++    check(!layout::round(4096, 4095, value), "non-power-of-two page");
++    check(!layout::round(UINT64_MAX, 4096, value), "page rounding overflow");
++    for (uint64_t page : {uint64_t(4096), uint64_t(16384)}) {
++        const uintptr_t address = (uintptr_t)(page * 2);
++        check(layout::round(page, page, value) && value == page, "exact page stays exact");
++        check(layout::round(page + 1, page, value) && value == page * 2, "partial page rounds");
++        check(layout::import((void *)address, page, page), "aligned mapped page");
++        check(!layout::import(nullptr, page, page), "null import");
++        check(!layout::import((void *)(address + 4), page, page), "unaligned import");
++        check(!layout::import((void *)address, page - 1, page), "short non-page mapped extent");
++        check(!layout::import((void *)(UINTPTR_MAX & ~(uintptr_t)(page - 1)), page, page), "address wrapping");
++        // Rounded length alone is not mapping evidence: these are independent valid-byte and VM-coverage checks.
++        const uint64_t validBytes = page + 4, shortMapping = validBytes;
++        check(layout::round(validBytes, page, value) && value > shortMapping, "reject rounded target beyond real map");
++        check(value <= page * 2 && layout::import((void *)address, value, page), "accept explicitly covered rounded target");
++        check(!layout::import((void *)address, validBytes, page), "never enlarge source wire extent implicitly");
++    }
++    check(layout::dimensions(1, 1), "minimal dimensions");
++    check(layout::dimensions(16384, 16384), "maximum dimensions");
++    check(!layout::dimensions(0, 1) && !layout::dimensions(1, 0), "zero dimensions");
++    check(!layout::dimensions(16385, 1) && !layout::dimensions(1, 16385), "dimension limit");
++    check(layout::rows(2, 2, 16, 4, 24), "valid final row without padding");
++    check(!layout::rows(2, 2, 16, 4, 23), "short visible final row");
++    check(layout::rows(1, 1, UINT64_MAX, 4, 4), "one-row unused pitch does not overflow");
++    check(!layout::rows(2, 3, UINT64_MAX, 4, UINT64_MAX), "row offset multiplication overflow");
++    check(!layout::rows(2, 2, UINT64_MAX - 3, 4, UINT64_MAX), "last row addition overflow");
++    check(!layout::rows(16384, 1, UINT64_MAX, UINT64_MAX, UINT64_MAX), "pixel width multiplication overflow");
++    check(!layout::rows(1, 1, 4, 0, 4), "zero bytes per pixel");
++    check(!layout::rows(2, 1, 7, 4, 8), "short row pitch");
++    check(layout::wordPitch(uint64_t(UINT32_MAX) * 4), "maximum representable shader word pitch");
++    check(!layout::wordPitch((uint64_t(UINT32_MAX) + 1) * 4), "shader pitch truncation");
++    check(!layout::wordPitch(6), "unaligned shader word pitch");
++    const uint64_t fullExtent = 12732672;
++    check(layout::b3a8(1080, 2340, 1088, fullExtent), "real 1080x2340 alpha pitch 1088 extent");
++    check(!layout::b3a8(1080, 2340, 1088, fullExtent - 1), "missing final alpha byte");
++    check(!layout::b3a8(1080, 2340, 1088, 1088ull * 2340 * 4), "colour only does not cover full b3a8");
++    check(!layout::b3a8(1080, 2340, 1079, fullExtent), "b3a8 short alpha pitch");
++    check(!layout::b3a8(1080, 2340, uint64_t(UINT32_MAX) + 1, UINT64_MAX), "b3a8 sourceWords cannot truncate");
++    check(layout::b3a8(1, 1, 1, 4097), "b3a8 alpha follows 4096-aligned colour");
++    check(!layout::b3a8(1, 1, 1, 4096), "b3a8 still requires alpha although shader skips it");
++    check(!layout::b3a8(0, 1, 1, 8192), "b3a8 zero dimensions");
++    std::printf("PASS: %u checked scanout layout cases (4 KiB and 16 KiB pages)\n", checks);
++}
+diff --git a/shaders/scanout_convert.ll b/shaders/scanout_convert.ll
+index 010993bff85a0d17d68b29bb35ecc223be49d9f3..3c7ccac208b29cb153a0b726e41c57d04586750c 100644
+--- a/shaders/scanout_convert.ll
++++ b/shaders/scanout_convert.ll
+@@ -106,10 +106,82 @@ done:
+   ret void
+ }
+ 
++; scanout_b3a8: plane 0 is XRGB2101010 (R at bit 20, G at bit 10, B at bit 0).
++; p is width, height, sourceWords, destinationWords; sourceWords is the alpha plane's byte stride, not stride / 4.
++; XR codes clip to [384,894], then (code - 384 + 1) >> 1 is exactly ((code - 384) * 255 + 255) / 510.
++; The alpha plane is not read; the scanout is opaque. No transfer function or table is applied.
++;   kernel void scanout_b3a8(device const uint *src [[buffer(0)]], device uint *dst [[buffer(1)]], constant uint4 &p [[buffer(3)]],
++;                            uint2 gid [[thread_position_in_grid]])
++define void @scanout_b3a8(ptr addrspace(1) noundef readonly "air-buffer-no-alias" %src, ptr addrspace(1) noundef "air-buffer-no-alias" %dst, ptr addrspace(2) noundef readonly align 16 dereferenceable(16) "air-buffer-no-alias" %p, <2 x i32> noundef %gid) local_unnamed_addr #0 {
++entry:
++  %w = load i32, ptr addrspace(2) %p, align 16
++  %ph = getelementptr inbounds i32, ptr addrspace(2) %p, i64 1
++  %h = load i32, ptr addrspace(2) %ph, align 4
++  %x = extractelement <2 x i32> %gid, i64 0
++  %y = extractelement <2 x i32> %gid, i64 1
++  %inx = icmp ult i32 %x, %w
++  %iny = icmp ult i32 %y, %h
++  %in = and i1 %inx, %iny
++  br i1 %in, label %body, label %done
++
++body:
++  %pss = getelementptr inbounds i32, ptr addrspace(2) %p, i64 2
++  %ss = load i32, ptr addrspace(2) %pss, align 8
++  %pds = getelementptr inbounds i32, ptr addrspace(2) %p, i64 3
++  %ds = load i32, ptr addrspace(2) %pds, align 4
++  %x64 = zext i32 %x to i64
++  %y64 = zext i32 %y to i64
++  %ss64 = zext i32 %ss to i64
++  %srow = mul i64 %y64, %ss64
++  %si = add i64 %srow, %x64
++  %sp = getelementptr inbounds i32, ptr addrspace(1) %src, i64 %si
++  %v = load i32, ptr addrspace(1) %sp, align 4
++  %rshift = lshr i32 %v, 20
++  %gshift = lshr i32 %v, 10
++  %r = and i32 %rshift, 1023
++  %g = and i32 %gshift, 1023
++  %b = and i32 %v, 1023
++  %rlo = icmp ult i32 %r, 384
++  %glo = icmp ult i32 %g, 384
++  %blo = icmp ult i32 %b, 384
++  %rfloor = select i1 %rlo, i32 384, i32 %r
++  %gfloor = select i1 %glo, i32 384, i32 %g
++  %bfloor = select i1 %blo, i32 384, i32 %b
++  %rhi = icmp ugt i32 %rfloor, 894
++  %ghi = icmp ugt i32 %gfloor, 894
++  %bhi = icmp ugt i32 %bfloor, 894
++  %rclip = select i1 %rhi, i32 894, i32 %rfloor
++  %gclip = select i1 %ghi, i32 894, i32 %gfloor
++  %bclip = select i1 %bhi, i32 894, i32 %bfloor
++  %rzero = sub i32 %rclip, 384
++  %gzero = sub i32 %gclip, 384
++  %bzero = sub i32 %bclip, 384
++  %rround = add i32 %rzero, 1
++  %ground = add i32 %gzero, 1
++  %bround = add i32 %bzero, 1
++  %rv = lshr i32 %rround, 1
++  %gv = lshr i32 %ground, 1
++  %bv = lshr i32 %bround, 1
++  %rs = shl i32 %rv, 16
++  %gs = shl i32 %gv, 8
++  %rg = or i32 %rs, %gs
++  %rgb = or i32 %rg, %bv
++  %px = or i32 %rgb, -16777216
++  %ds64 = zext i32 %ds to i64
++  %drow = mul i64 %y64, %ds64
++  %di = add i64 %drow, %x64
++  %dp = getelementptr inbounds i32, ptr addrspace(1) %dst, i64 %di
++  store i32 %px, ptr addrspace(1) %dp, align 4
++  br label %done
++
++done:
++  ret void
++}
++
+ attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins" "no-trapping-math"="true" "stack-protector-buffer-size"="8" }
+ 
+ !llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6, !7, !8}
+-!air.kernel = !{!9, !22}
++!air.kernel = !{!9, !22, !26}
+ !air.compile_options = !{!17, !18}
+ !llvm.ident = !{!19}
+ !air.version = !{!20}
+@@ -141,3 +213,5 @@ attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn "fram
+ !23 = !{!12, !13, !25, !24}
+ !24 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"gid"}
+ !25 = !{i32 2, !"air.buffer", !"air.buffer_size", i32 16, !"air.location_index", i32 3, i32 1, !"air.read", !"air.address_space", i32 2, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"uint4", !"air.arg_name", !"p"}
++!26 = !{ptr @scanout_b3a8, !10, !27}
++!27 = !{!12, !13, !25, !24}

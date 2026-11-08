@@ -1,53 +1,39 @@
 name: GPU plugin
 
-# UniXNU's Adreno Metal plugin (drivers/AdrenoMetal: NativeAdrenoMetal.bundle with Turnip and the metal2vulkan bridge) packed as
-# the GPU addon the payload carries (unixnu build payload --gpu-addon), built on a hosted macOS runner because it needs the
-# iphoneos SDK and codesign. scripts/ci/build-gpu-plugin.py runs build-boot-runtime.py build_plugin('ios') (Mesa + recorded
-# patches, build-turnip-darwin.py --target ios, build-adreno-metal-plugin.py --target ios --no-replay) and
-# make-gpu-addon.py --publish --no-daemon, then checks the addon's executables against trust.json's CDHashes.
-#
-# Kernel ABI: Turnip's Darwin backend and the plugin compile against drivers/Adreno740's NativeAdrenoABI.h (UniXNU's pin).
-# FFT-infra/Adreno650@70771a7 (cas's kernel driver, scripts/build-adreno650.py) has the same header minus methods 17
-# (SetPriority) and 18 (Note) and their structs; the version (2), every other method number and every layout are the same.
-# Turnip names both methods, so the A650 header does not compile it; the A650 user client answers both with
-# kIOReturnUnsupported (inputSize/outputSize SIZE_MAX), which Turnip ignores (SetPriority at open) or reports as false.
-#
-# Built only from open sources and the SDK: the artifact (addon, trust.json, logs) is not encrypted and is never committed.
-
+# Public inputs only. gpu019 uses a separately reviewed branch; do not push wf/m1
+# for this task. The wrapper enforces all pins and patch hashes independently.
+# The complete CI result and provenance.json are required for deployment. A host
+# with no GPU records pixel tests as SKIP, never as hardware/pixel acceptance.
 on:
-  # workflow_dispatch only reaches workflows on the default branch, so a push of this file or its script to the work
-  # branch also runs it (with the input defaults).
   push:
-    branches: [wf/m1]
-    paths: ['.github/workflows/gpu-plugin.yml', 'scripts/ci/build-gpu-plugin.py']
+    branches: [wf/m1, wf/gpu019-plugin-ci]
+    paths: ['.github/workflows/gpu-plugin.yml', 'scripts/ci/build-gpu-plugin.py', 'scripts/ci/patches/**']
   workflow_dispatch:
-    inputs:
-      unixnu_ref:
-        description: UniXNU commit the plugin is built from
-        required: true
-        default: e2fdae4312d0acc3d8a52bc457101e7918095e6a
 
 permissions:
   contents: read
 
 env:
-  UNIXNU_REF: ${{ inputs.unixnu_ref || 'e2fdae4312d0acc3d8a52bc457101e7918095e6a' }}
+  UNIXNU_REF: e2fdae4312d0acc3d8a52bc457101e7918095e6a
   RUST_TOOLCHAIN: 1.98.0
   BISON_VERSION: 3.8.2
   BISON_SHA256: 9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+  IPHONEOS_DEPLOYMENT_TARGET: '17.0'
 
 jobs:
   plugin:
     runs-on: macos-26
     timeout-minutes: 180
     steps:
-      - name: Check out this repository (build script)
+      - name: Check out the public CI inputs
         uses: actions/checkout@v4
         with:
           path: cas
           persist-credentials: false
 
-      - name: Check out UniXNU
+      - name: Check out the pinned framework
         uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
@@ -55,64 +41,67 @@ jobs:
           path: unixnu
           persist-credentials: false
 
-      # Only what the plugin reads: AdrenoMetal (plugin, bridge), Adreno740 (NativeAdrenoABI.h), AdrenoPM4 and
-      # GopFramebuffer (GpuScanoutPresenter.h). drivers/ArmCpu and the others are not initialised.
-      - name: Fetch the plugin's submodules
+      # Only public plugin dependencies; no ArmCpu, firmware or target OS images.
+      - name: Fetch the plugin's pinned submodules
         run: |
           set -euo pipefail
+          test "$(git -C unixnu rev-parse HEAD)" = "$UNIXNU_REF"
           git -C unixnu submodule update --init --depth 1 \
             drivers/AdrenoMetal drivers/Adreno740 kits/AdrenoPM4 drivers/GopFramebuffer
           git -C unixnu submodule status drivers/AdrenoMetal drivers/Adreno740 kits/AdrenoPM4 drivers/GopFramebuffer
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: '3.13'
 
-      - name: Install the host tools
+      - name: Run the wrapper's offline guard tests
+        run: python3 -I cas/scripts/ci/build-gpu-plugin.py --self-test
+
+      - name: Install host compiler and validation tools
         run: |
           set -euo pipefail
-          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-          brew install glslang shaderc spirv-tools ninja llvm
+          brew install glslang shaderc spirv-tools ninja llvm molten-vk
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-apple-ios
+          printf '%s\n' /opt/homebrew/opt/llvm/bin >> "$GITHUB_PATH"
           {
             xcodebuild -version
-            xcrun --sdk iphoneos --show-sdk-path
-            xcrun --sdk iphoneos clang --version | head -1
-            /opt/homebrew/opt/llvm/bin/llvm-as --version | head -2
-            glslangValidator --version | head -1
-            glslc --version | head -1
-            spirv-val --version | head -1
+            xcrun --sdk iphoneos --show-sdk-version
+            xcrun --sdk iphoneos clang --version
+            /opt/homebrew/opt/llvm/bin/llvm-as --version
+            glslangValidator --version
+            glslc --version
+            spirv-val --version
             ninja --version
             cargo "+$RUST_TOOLCHAIN" --version
             python3 --version
             flex --version
           } 2>&1 | tee "$RUNNER_TEMP/toolchain.txt"
 
-      - name: Restore the pinned bison
+      - name: Restore pinned bison
         id: bison-cache
         uses: actions/cache@v4
         with:
           path: unixnu/.cache/mesa-tools
           key: mesa-tools-bison-${{ env.BISON_VERSION }}-macos-26-arm64
 
-      - name: Build the pinned bison
+      - name: Build pinned bison
         if: steps.bison-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          src="$RUNNER_TEMP/bison"
-          mkdir -p "$src"
+          src="$(mktemp -d "$RUNNER_TEMP/bison-download.XXXXXX")"
+          build="$(mktemp -d "$RUNNER_TEMP/bison-build.XXXXXX")"
           for url in https://ftp.gnu.org/gnu/bison https://ftpmirror.gnu.org/bison https://mirrors.kernel.org/gnu/bison; do
             curl -fsSL --retry 3 -o "$src/bison.tar.xz" "$url/bison-$BISON_VERSION.tar.xz" && break
           done
-          echo "$BISON_SHA256  $src/bison.tar.xz" | shasum -a 256 -c -
+          printf '%s  %s\n' "$BISON_SHA256" "$src/bison.tar.xz" | shasum -a 256 -c -
           tar -C "$src" -xf "$src/bison.tar.xz"
-          cd "$src/bison-$BISON_VERSION"
-          ./configure --prefix="$GITHUB_WORKSPACE/unixnu/.cache/mesa-tools" --disable-nls > /dev/null
+          cd "$build"
+          "$src/bison-$BISON_VERSION/configure" --prefix="$GITHUB_WORKSPACE/unixnu/.cache/mesa-tools" --disable-nls > /dev/null
           make -j"$(sysctl -n hw.ncpu)" > /dev/null
           make install > /dev/null
-          "$GITHUB_WORKSPACE/unixnu/.cache/mesa-tools/bin/bison" --version | head -1
+          "$GITHUB_WORKSPACE/unixnu/.cache/mesa-tools/bin/bison" --version
 
-      - name: Restore the cargo registry
+      - name: Restore cargo download cache only
         uses: actions/cache@v4
         with:
           path: |
@@ -122,40 +111,61 @@ jobs:
           key: cargo-registry-${{ env.RUST_TOOLCHAIN }}-${{ github.run_id }}
           restore-keys: cargo-registry-${{ env.RUST_TOOLCHAIN }}-
 
-      - name: Build the plugin and the GPU addon
+      - name: Build, qualify and sign the iOS 17 addon
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/out"
-          python3 cas/scripts/ci/build-gpu-plugin.py unixnu "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          python3 -I cas/scripts/ci/build-gpu-plugin.py unixnu "$RUNNER_TEMP/gpu019-out" \
+            --inputs cas/scripts/ci/patches/inputs.json 2>&1 | tee "$RUNNER_TEMP/build.log"
 
-      - name: Collect the outputs and logs
+      - name: Collect bounded diagnostics
         if: always()
         run: |
-          set +e
-          out="$RUNNER_TEMP/out"
-          mkdir -p "$out/logs"
-          cp "$RUNNER_TEMP/build.log" "$RUNNER_TEMP/toolchain.txt" "$out/logs/" 2>/dev/null
-          cp unixnu/.cache/mesa-tu-ios-*.log "$out/logs/" 2>/dev/null
-          cp unixnu/build/adreno-metal-bridge/build-ios.log "$out/logs/bridge-build-ios.log" 2>/dev/null
-          cp unixnu/build/mesa-tu-ios/builtin-build-profile.json "$out/" 2>/dev/null
-          cp unixnu/build/mesa-tu-ios/meson-logs/meson-log.txt "$out/logs/mesa-meson-log.txt" 2>/dev/null
-          if [ -d unixnu/build/adreno-metal-plugin/NativeAdrenoMetal.bundle ]; then
-            tar -C unixnu/build/adreno-metal-plugin -czf "$out/NativeAdrenoMetal.bundle.tar.gz" NativeAdrenoMetal.bundle
-          fi
-          {
-            echo "unixnu $(git -C unixnu rev-parse HEAD)"
-            git -C unixnu submodule status drivers/AdrenoMetal drivers/Adreno740 kits/AdrenoPM4 drivers/GopFramebuffer
-            (cd "$out" && shasum -a 256 gpuaddon.bin trust.json NativeAdrenoMetal.bundle.tar.gz 2>/dev/null)
-            cat "$out/trust.json" 2>/dev/null
-          } | tee "$out/inputs.txt"
-          { echo '### GPU plugin'; echo '```'; cat "$out/inputs.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          exit 0
+          python3 -I - <<'PY'
+          import json, os, pathlib, shutil
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          diag = temp / 'gpu019-diagnostics'
+          diag.mkdir(exist_ok=True)
+          sources = [temp / 'build.log', temp / 'toolchain.txt',
+                     temp / 'gpu019-out/provenance.json', temp / 'gpu019-out/tests.json',
+                     pathlib.Path('unixnu/build/adreno-metal-bridge/build-ios.log'),
+                     pathlib.Path('unixnu/build/adreno-metal-bridge/build-host.log'),
+                     pathlib.Path('unixnu/build/mesa-tu-ios/meson-logs/meson-log.txt')]
+          sources += sorted((temp / 'gpu019-out/logs').glob('*.log'))
+          sources += sorted(pathlib.Path('unixnu/.cache').glob('mesa-tu-ios-*.log'))
+          for index, path in enumerate(sources):
+              if path.is_file() and not path.is_symlink():
+                  shutil.copyfile(path, diag / (str(index) + '-' + path.name))
+          path = temp / 'gpu019-out/provenance.json'
+          if path.is_file():
+              report = json.loads(path.read_text())
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write('### gpu019 plugin\nStatus: ' + report['status'] + '\n\n')
+                  for name, result in report['tests'].items():
+                      summary.write('- ' + name + ': **' + result['status'] + '**\n')
+                  summary.write('\nHost pixels are not Adreno/device acceptance. Only a successful job with matching provenance is deployable.\n')
+          PY
 
-      - name: Upload
+      - name: Upload verified addon and provenance
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cas-gpu019-plugin
+          path: |
+            ${{ runner.temp }}/gpu019-out/gpuaddon.bin
+            ${{ runner.temp }}/gpu019-out/trust.json
+            ${{ runner.temp }}/gpu019-out/checks.json
+            ${{ runner.temp }}/gpu019-out/provenance.json
+            ${{ runner.temp }}/gpu019-out/tests.json
+            ${{ runner.temp }}/gpu019-out/gpu-build.json
+            ${{ runner.temp }}/gpu019-out/NativeAdrenoMetal.bundle.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload diagnostics only
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cas-gpu-plugin
-          path: ${{ runner.temp }}/out
-          if-no-files-found: error
+          name: cas-gpu019-diagnostics
+          path: ${{ runner.temp }}/gpu019-diagnostics
+          if-no-files-found: warn
           retention-days: 7
