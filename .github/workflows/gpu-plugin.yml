@@ -20,7 +20,6 @@ env:
   BISON_SHA256: 9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2
   HOMEBREW_NO_AUTO_UPDATE: '1'
   HOMEBREW_NO_INSTALL_CLEANUP: '1'
-  IPHONEOS_DEPLOYMENT_TARGET: '17.0'
 
 jobs:
   plugin:
@@ -90,6 +89,10 @@ jobs:
           set -euo pipefail
           src="$(mktemp -d "$RUNNER_TEMP/bison-download.XXXXXX")"
           build="$(mktemp -d "$RUNNER_TEMP/bison-build.XXXXXX")"
+          unset IPHONEOS_DEPLOYMENT_TARGET
+          export CC="$(xcrun --sdk macosx --find clang)"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export MACOSX_DEPLOYMENT_TARGET=14.0
           for url in https://ftp.gnu.org/gnu/bison https://ftpmirror.gnu.org/bison https://mirrors.kernel.org/gnu/bison; do
             curl -fsSL --retry 3 -o "$src/bison.tar.xz" "$url/bison-$BISON_VERSION.tar.xz" && break
           done
@@ -130,6 +133,7 @@ jobs:
                      pathlib.Path('unixnu/build/adreno-metal-bridge/build-ios.log'),
                      pathlib.Path('unixnu/build/adreno-metal-bridge/build-host.log'),
                      pathlib.Path('unixnu/build/mesa-tu-ios/meson-logs/meson-log.txt')]
+          sources += sorted(temp.glob('bison-build.*/config.log'))
           sources += sorted((temp / 'gpu019-out/logs').glob('*.log'))
           sources += sorted(pathlib.Path('unixnu/.cache').glob('mesa-tu-ios-*.log'))
           for index, path in enumerate(sources):

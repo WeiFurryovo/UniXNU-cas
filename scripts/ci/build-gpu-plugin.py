@@ -299,13 +299,27 @@ int main(int argc, char **argv) {
 '''
 
 
-def host_checks(root, out, report):
-    test_command(report, out, 'host-bridge-build',
-                 [sys.executable, root / 'scripts/build-adreno-metal-bridge.py', '--target', 'host'], timeout=2100)
+def target_environment(sdk, deployment, base=None):
+    env = dict(os.environ if base is None else base)
+    for key in ('SDKROOT', 'IPHONEOS_DEPLOYMENT_TARGET', 'MACOSX_DEPLOYMENT_TARGET'):
+        env.pop(key, None)
+    env['SDKROOT'] = str(sdk)
+    env[deployment[0]] = deployment[1]
+    return env
+
+
+def host_checks(root, out, report, host_env):
+    # Every host subprocess receives its own macOS SDK; never export it globally.
+    def host_test(report, out, name, command, **kwargs):
+        kwargs.setdefault('env', host_env)
+        return test_command(report, out, name, command, **kwargs)
+
+    host_test(report, out, 'host-bridge-build',
+              [sys.executable, root / 'scripts/build-adreno-metal-bridge.py', '--target', 'host'], timeout=2100)
     build = root / 'build/adreno-metal-bridge'
     air = build / 'scanout_convert.air'
-    host_triple = output(llvm_tool('clang'), '-dumpmachine')
-    test_command(report, out, 'air-verifier',
+    host_triple = output(llvm_tool('clang'), '-dumpmachine', env=host_env)
+    host_test(report, out, 'air-verifier',
                  [llvm_tool('opt'), '-mtriple=' + host_triple, '-passes=verify', '-disable-output', air])
     work = root / 'build/gpu019-ci-tests'
     work.mkdir()
@@ -321,18 +335,18 @@ def host_checks(root, out, report):
                                lambda _: binary_section, bridge_manifest, count=1, flags=re.S))
     shutil.copyfile(build / 'Cargo.lock', work / 'Cargo.lock')
     # Reuse the bridge's exact translator, features, profile and Cargo target directory.
-    test_command(report, out, 'air-translator-build',
+    host_test(report, out, 'air-translator-build',
                  ['cargo', '+1.98.0', 'build', '--release', '--locked', '--manifest-path', manifest,
                   '--target', 'aarch64-apple-darwin', '--target-dir', root / 'build/m2v-target', '--bin', 'gpu019-translate'],
                  timeout=1800)
     profile = root / '.cache/gpu-reference/metal2vulkan/crates/metal2vulkan-validation/profiles/vk12-bare.json'
-    text = test_command(report, out, 'air-translation',
+    text = host_test(report, out, 'air-translation',
                         [root / 'build/m2v-target/aarch64-apple-darwin/release/gpu019-translate', profile, air, work],
                         marker='PASS: translated scanout_b3a8')
     require(all(f'PASS: translated {name}' in text for name in ('scanout_convert', 'scanout_opaque', 'scanout_b3a8')),
             'not all scanout entry points translated')
     for name in ('scanout_convert', 'scanout_opaque', 'scanout_b3a8'):
-        test_command(report, out, name + '-spirv-validation', ['spirv-val', '--target-env', 'vulkan1.2', work / (name + '.spv')])
+        host_test(report, out, name + '-spirv-validation', ['spirv-val', '--target-env', 'vulkan1.2', work / (name + '.spv')])
     report['translation'] = {'gpu_execution': False, 'air_sha256': digest(air), 'profile_sha256': digest(profile),
                              'source_sha256': digest(translate),
                              'spirv_sha256': {p.name: digest(p) for p in sorted(work.glob('*.spv'))}}
@@ -341,16 +355,16 @@ def host_checks(root, out, report):
              '-Wno-unused-parameter', '-Wno-deprecated-declarations', '-I', kit]
     frameworks = ['-framework', 'Foundation', '-framework', 'Metal', '-framework', 'IOSurface', '-framework', 'CoreFoundation']
     for name in ('scanout_host', 'present_host'):
-        test_command(report, out, name + '-compile',
+        host_test(report, out, name + '-compile',
                      ['xcrun', '--sdk', 'macosx', 'clang++', *flags, kit / 'NativeBridgeMetalFrontend.mm',
                       kit / 'bridge' / (name + '.mm'), build / 'host/libadreno_metal_bridge.a', *frameworks, '-o', work / name])
     probe = work / 'capability.mm'
     probe.write_text(CAPABILITY_MM)
-    test_command(report, out, 'host-capability-compile',
+    host_test(report, out, 'host-capability-compile',
                  ['xcrun', '--sdk', 'macosx', 'clang++', *flags, '-I', root / '.cache/mesa-work/include',
                   probe, '-framework', 'Foundation', '-framework', 'Metal', '-o', work / 'capability'])
     loader = Path('/opt/homebrew/lib/libMoltenVK.dylib')
-    capability = subprocess.run([str(work / 'capability'), str(loader)], capture_output=True, text=True, timeout=60)
+    capability = subprocess.run([str(work / 'capability'), str(loader)], capture_output=True, text=True, timeout=60, env=host_env)
     (out / 'logs/host-capability.log').write_text(capability.stdout + capability.stderr)
     require(capability.returncode in (0, 77), 'host capability probe failed unexpectedly')
     report['tests']['host-capability'] = {'status': 'PASS' if capability.returncode == 0 else 'SKIP',
@@ -361,17 +375,17 @@ def host_checks(root, out, report):
         for name in names:
             report['tests'][name] = {'status': 'SKIP', 'reason': capability.stdout.strip(), 'gpu_execution': False}
         return
-    env = dict(os.environ)
+    env = dict(host_env)
     env.pop('NMB_SYSTEM_DEVICE', None)
     for name in ('scanout_host', 'present_host'):
         cache = work / (name + '-cache')
         cache.mkdir()
         for state in ('cold', 'warm'):
-            text = test_command(report, out, name + '-' + state, [work / name, loader, cache], env=env, marker='PASS:')
+            text = host_test(report, out, name + '-' + state, [work / name, loader, cache], env=env, marker='PASS:')
             if name == 'scanout_host':
                 require('b3a8' in text.lower(), 'scanout test did not report b3a8 coverage')
             report['tests'][name + '-' + state]['gpu_execution'] = True
-    test_command(report, out, 'present_host-system', [work / 'present_host', loader, work / 'system-cache'],
+    host_test(report, out, 'present_host-system', [work / 'present_host', loader, work / 'system-cache'],
                  env=dict(env, NMB_SYSTEM_DEVICE='1'), marker='PASS:')
     report['tests']['present_host-system']['gpu_execution'] = True
 
@@ -466,22 +480,28 @@ def build(root, out, inputs_path, report):
     sdk = Path(output('xcrun', '--sdk', 'iphoneos', '--show-sdk-path'))
     require(sdk.is_dir() and (sdk / 'SDKSettings.json').is_file(), 'real iphoneos SDK required')
     report['toolchain']['ios_sdk_settings_sha256'] = digest(sdk / 'SDKSettings.json')
+    host_sdk = Path(output('xcrun', '--sdk', 'macosx', '--show-sdk-path'))
+    require(host_sdk.is_dir() and (host_sdk / 'SDKSettings.json').is_file(), 'real macOS SDK required')
+    host_env = target_environment(host_sdk, ('MACOSX_DEPLOYMENT_TARGET', '14.0'))
+    ios_env = target_environment(sdk, ('IPHONEOS_DEPLOYMENT_TARGET', '17.0'))
+    report['toolchain']['macos_sdk_settings_sha256'] = digest(host_sdk / 'SDKSettings.json')
+    report['toolchain']['host_deployment_target'] = '14.0'
     test_command(report, out, 'b3a8-ir',
                  [sys.executable, '-I', root / 'drivers/AdrenoMetal/bridge/check_scanout_b3a8.py',
                   '--clang', llvm_tool('clang'), '--llvm-as', llvm_tool('llvm-as'), '--opt', llvm_tool('opt')],
-                 marker='PASS: complete AIR verifies; actual kernel passes O0, O2 and ASan/UBSan host runs')
+                 env=host_env, marker='PASS: complete AIR verifies; actual kernel passes O0, O2 and ASan/UBSan host runs')
     layout = root / 'build/gpu019-layout-test'
     layout.parent.mkdir(exist_ok=True)
     test_command(report, out, 'scanout-layout-compile',
                  [llvm_tool('clang++'), '-std=c++17', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
-                  root / 'drivers/AdrenoMetal/bridge/scanout_layout_host.cpp', '-o', layout])
-    test_command(report, out, 'scanout-layout', [layout], marker='PASS')
+                  root / 'drivers/AdrenoMetal/bridge/scanout_layout_host.cpp', '-o', layout], env=host_env)
+    test_command(report, out, 'scanout-layout', [layout], env=host_env, marker='PASS')
     client = root / 'build/gpu019-client-test'
     test_command(report, out, 'scanout-client-compile',
                  ['xcrun', '--sdk', 'macosx', 'clang++', '-std=c++17', '-fobjc-arc',
                   '-framework', 'Foundation', '-framework', 'Metal',
-                  root / 'drivers/AdrenoMetal/bridge/scanout_client_host.mm', '-o', client])
-    test_command(report, out, 'scanout-client', [client], marker='PASS')
+                  root / 'drivers/AdrenoMetal/bridge/scanout_client_host.mm', '-o', client], env=host_env)
+    test_command(report, out, 'scanout-client', [client], env=host_env, marker='PASS')
 
     # The existing iOS17 unused-function warning workaround, recorded by the source manifest.
     plugin_script = root / 'scripts/build-adreno-metal-plugin.py'
@@ -505,7 +525,7 @@ def build(root, out, inputs_path, report):
     translator = strict_json(root / 'scripts/data/gpu-metal-vulkan-inputs.json')['translator']
     checkout(root / '.cache/gpu-reference/metal2vulkan', translator)
     report['translator'] = {'commit': translator['commit']}
-    host_checks(root, out, report)
+    host_checks(root, out, report, host_env)
     report['source_sha256'] = source_hashes(root)
     report['source_manifest_sha256'] = hashlib.sha256(json.dumps(report['source_sha256'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     report['translator']['patches'] = {p.relative_to(root).as_posix(): digest(p)
@@ -513,9 +533,9 @@ def build(root, out, inputs_path, report):
     venv = root / '.cache/mesa-venv'
     run(sys.executable, '-m', 'venv', venv)
     run(venv / 'bin/python', '-m', 'pip', 'install', '-q', '-r', root / 'scripts/requirements-adreno-compiler.txt')
-    test_command(report, out, 'turnip-ios-build', [sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'ios'], timeout=3600)
+    test_command(report, out, 'turnip-ios-build', [sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'ios'], env=ios_env, timeout=3600)
     test_command(report, out, 'plugin-ios-build',
-                 [sys.executable, root / 'scripts/build-adreno-metal-plugin.py', '--target', 'ios', '--no-replay'], timeout=2400)
+                 [sys.executable, root / 'scripts/build-adreno-metal-plugin.py', '--target', 'ios', '--no-replay'], env=ios_env, timeout=2400)
     require(report['source_sha256'] == source_hashes(root), 'sources changed during compilation')
     plugin = root / 'build/adreno-metal-plugin'
     bundle = plugin / 'NativeAdrenoMetal.bundle'
